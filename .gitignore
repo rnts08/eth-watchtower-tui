@@ -1,0 +1,6 @@
+*.state
+*.jsonl
+*.reference
+*.watchlist
+*.reviewed
+eth-watchtower-tui
