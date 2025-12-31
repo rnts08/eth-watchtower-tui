@@ -2,28 +2,40 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
+	"math/big"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-const logFilePath = "eth-watchtower.jsonl"
-const stateFilePath = "eth-watchtower.state"
-const reviewedFilePath = "eth-watchtower.reviewed"
-const watchlistFilePath = "eth-watchtower.watchlist"
+var logFilePath = "eth-watchtower.jsonl"
+
+var stateFilePath = "eth-watchtower.state"
+var reviewedFilePath = "eth-watchtower.reviewed"
+var watchlistFilePath = "eth-watchtower.watchlist"
+var pinnedFilePath = "eth-watchtower.pinned"
+var watchedDeployersFilePath = "eth-watchtower.watched_deployers"
+var commandHistoryFilePath = "eth-watchtower.command_history"
+
 const sidePaneWidth = 35
 
 var (
@@ -38,9 +50,11 @@ var (
 			Foreground(lipgloss.Color("241")).
 			MarginLeft(1)
 
-	highRiskStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
-	medRiskStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA500"))
-	lowRiskStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
+	criticalRiskStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
+	highRiskStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA500"))
+	medRiskStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFF00"))
+	lowRiskStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFACD"))
+	safeRiskStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
 
 	alertStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFFFFF")).
@@ -55,6 +69,15 @@ var (
 			Padding(0, 1).
 			Border(lipgloss.NormalBorder(), false, false, false, true).
 			BorderLeftForeground(lipgloss.Color("240"))
+
+	highRiskAlertStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(lipgloss.Color("#FF0000")).
+				Padding(1, 3).
+				Border(lipgloss.DoubleBorder()).
+				BorderForeground(lipgloss.Color("#FFFFFF")).
+				Align(lipgloss.Center)
 )
 
 // keyMap defines a set of keybindings.
@@ -71,7 +94,28 @@ type keyMap struct {
 	Watch           key.Binding
 	FilterFlag      key.Binding
 	ClearFlagFilter key.Binding
-	About           key.Binding
+	ToggleLegend    key.Binding
+	Pin             key.Binding
+	CopyDeployer    key.Binding
+	WatchDeployer   key.Binding
+	IncreaseRisk    key.Binding
+	DecreaseRisk    key.Binding
+	Heatmap         key.Binding
+	ZoomIn          key.Binding
+	ZoomOut         key.Binding
+	HeatmapReset    key.Binding
+	HeatmapLeft     key.Binding
+	HeatmapRight    key.Binding
+	Compact         key.Binding
+	ToggleFooter    key.Binding
+	HeatmapFollow   key.Binding
+	JumpToAlert     key.Binding
+	MarkAllReviewed key.Binding
+	IncreaseMaxRisk key.Binding
+	DecreaseMaxRisk key.Binding
+	StatsView       key.Binding
+	CheatSheet      key.Binding
+	CommandPalette  key.Binding
 }
 
 // appKeys defines the keybindings for the application.
@@ -92,10 +136,13 @@ var appKeys = keyMap{
 		key.WithKeys("s"), key.WithHelp("s", "sort"),
 	),
 	Open: key.NewBinding(
-		key.WithKeys("o"), key.WithHelp("o", "open browser"),
+		key.WithKeys("o"), key.WithHelp("o", "open"),
 	),
 	Review: key.NewBinding(
 		key.WithKeys("x"), key.WithHelp("x", "mark reviewed"),
+	),
+	MarkAllReviewed: key.NewBinding(
+		key.WithKeys("X"), key.WithHelp("X", "mark all reviewed"),
 	),
 	ToggleReviewed: key.NewBinding(
 		key.WithKeys("H"), key.WithHelp("H", "show/hide reviewed"),
@@ -112,8 +159,68 @@ var appKeys = keyMap{
 	ClearFlagFilter: key.NewBinding(
 		key.WithKeys("F"), key.WithHelp("F", "clear flag filter"),
 	),
-	About: key.NewBinding(
-		key.WithKeys("a"), key.WithHelp("a", "about"),
+	ToggleLegend: key.NewBinding(
+		key.WithKeys("L"), key.WithHelp("L", "toggle legend"),
+	),
+	Pin: key.NewBinding(
+		key.WithKeys("P"), key.WithHelp("P", "pin/unpin"),
+	),
+	CopyDeployer: key.NewBinding(
+		key.WithKeys("d"), key.WithHelp("d", "copy deployer"),
+	),
+	WatchDeployer: key.NewBinding(
+		key.WithKeys("W"), key.WithHelp("W", "watch deployer"),
+	),
+	IncreaseRisk: key.NewBinding(
+		key.WithKeys("]"), key.WithHelp("]", "inc min risk"),
+	),
+	DecreaseRisk: key.NewBinding(
+		key.WithKeys("["), key.WithHelp("[", "dec min risk"),
+	),
+	IncreaseMaxRisk: key.NewBinding(
+		key.WithKeys(">"), key.WithHelp(">", "inc max risk"),
+	),
+	DecreaseMaxRisk: key.NewBinding(
+		key.WithKeys("<"), key.WithHelp("<", "dec max risk"),
+	),
+	Heatmap: key.NewBinding(
+		key.WithKeys("M"), key.WithHelp("M", "heatmap"),
+	),
+	ZoomIn: key.NewBinding(
+		key.WithKeys("=", "+"), key.WithHelp("+", "zoom in"),
+	),
+	ZoomOut: key.NewBinding(
+		key.WithKeys("-"), key.WithHelp("-", "zoom out"),
+	),
+	HeatmapReset: key.NewBinding(
+		key.WithKeys("0"), key.WithHelp("0", "reset zoom"),
+	),
+	HeatmapLeft: key.NewBinding(
+		key.WithKeys("left", "h"), key.WithHelp("←/h", "scroll left"),
+	),
+	HeatmapRight: key.NewBinding(
+		key.WithKeys("right", "l"), key.WithHelp("→/l", "scroll right"),
+	),
+	Compact: key.NewBinding(
+		key.WithKeys("z"), key.WithHelp("z", "compact mode"),
+	),
+	ToggleFooter: key.NewBinding(
+		key.WithKeys("V"), key.WithHelp("V", "toggle footer"),
+	),
+	HeatmapFollow: key.NewBinding(
+		key.WithKeys("t"), key.WithHelp("t", "follow mode"),
+	),
+	JumpToAlert: key.NewBinding(
+		key.WithKeys("!"), key.WithHelp("!", "jump to alert"),
+	),
+	StatsView: key.NewBinding(
+		key.WithKeys("S"), key.WithHelp("S", "stats"),
+	),
+	CheatSheet: key.NewBinding(
+		key.WithKeys("K"), key.WithHelp("K", "cheat sheet"),
+	),
+	CommandPalette: key.NewBinding(
+		key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "command palette"),
 	),
 }
 
@@ -122,6 +229,7 @@ type LogEntry struct {
 	Contract     string   `json:"contract"`
 	Deployer     string   `json:"deployer"`
 	Block        int      `json:"block"`
+	Timestamp    int64    `json:"timestamp"`
 	TokenType    string   `json:"tokenType"`
 	MintDetected bool     `json:"mintDetected"`
 	RiskScore    int      `json:"riskScore"`
@@ -132,27 +240,72 @@ type LogEntry struct {
 // item implements list.Item interface.
 type item struct {
 	LogEntry
-	watched bool
+	watched         bool
+	pinned          bool
+	watchedDeployer bool
 }
 
 func (i item) Title() string {
 	riskIcon := "🟢"
-	if i.RiskScore >= 50 {
+	barColor := "#00FF00" // Green
+	if i.RiskScore > 99 {
 		riskIcon = "🔴"
-	} else if i.RiskScore >= 20 {
+		barColor = "#FF0000"
+	} else if i.RiskScore > 74 {
 		riskIcon = "🟠"
+		barColor = "#FFA500"
+	} else if i.RiskScore > 49 {
+		riskIcon = "🟡"
+		barColor = "#FFFF00"
+	} else if i.RiskScore > 24 {
+		riskIcon = "🟡"
+		barColor = "#FFFACD"
 	}
+
+	// Visual Risk Bar
+	width := 5
+	filled := int(float64(i.RiskScore) / 100.0 * float64(width))
+	if filled > width {
+		filled = width
+	}
+	if filled < 1 && i.RiskScore > 0 {
+		filled = 1
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	coloredBar := lipgloss.NewStyle().Foreground(lipgloss.Color(barColor)).Render(bar)
+
 	watchedPrefix := ""
 	if i.watched {
 		watchedPrefix = "👀 "
 	}
-	return fmt.Sprintf("%s%s Risk: %d | %s", watchedPrefix, riskIcon, i.RiskScore, i.Contract)
+	if i.watchedDeployer {
+		watchedPrefix += "🕵️ "
+	}
+	pinnedPrefix := ""
+	if i.pinned {
+		pinnedPrefix = "📌 "
+	}
+	return fmt.Sprintf("%s%s%s %s %d | %s", pinnedPrefix, watchedPrefix, riskIcon, coloredBar, i.RiskScore, i.Contract)
 }
 
 func (i item) Description() string {
 	flags := "None"
 	if len(i.Flags) > 0 {
-		flags = strings.Join(i.Flags, ", ")
+		var sb strings.Builder
+		lineLen := 0
+		for idx, f := range i.Flags {
+			if idx > 0 {
+				sb.WriteString(", ")
+				lineLen += 2
+			}
+			if lineLen+len(f) > 50 {
+				sb.WriteString("\n")
+				lineLen = 0
+			}
+			sb.WriteString(f)
+			lineLen += len(f)
+		}
+		flags = sb.String()
 	}
 	return fmt.Sprintf("Block: %d | Flags: %s", i.Block, flags)
 }
@@ -182,6 +335,17 @@ type Stats struct {
 	FlagCounts      map[string]int
 }
 
+type BlockchainData struct {
+	Balance      string
+	CodeSize     int
+	GasUsed      string
+	Status       string
+	InputData    string
+	DecodedInput string
+	Fetched      bool
+	Error        error
+}
+
 type model struct {
 	list          list.Model
 	viewport      viewport.Model
@@ -194,25 +358,61 @@ type model struct {
 	windowHeight  int
 
 	// State for live updates
-	fileOffset        int64
-	contractsSet      map[string]bool
-	deployersSet      map[string]bool
-	sumRisk           int
-	alertMsg          string
-	paused            bool
-	reviewedSet       map[string]bool
-	watchlistSet      map[string]bool
-	sortMode          SortMode
-	confirmingReview  bool
-	showReviewed      bool
-	showingHelp       bool
-	pendingReviewItem *item
-	detailFlagIndex   int
-	showingFlagInfo   bool
-	showingAbout      bool
-	flagList          list.Model
-	showingFlagList   bool
-	activeFlagFilter  string
+	fileOffset            int64
+	contractsSet          map[string]bool
+	deployersSet          map[string]bool
+	sumRisk               int
+	alertMsg              string
+	paused                bool
+	reviewedSet           map[string]bool
+	watchlistSet          map[string]bool
+	pinnedSet             map[string]bool
+	watchedDeployersSet   map[string]bool
+	sortMode              SortMode
+	confirmingReview      bool
+	showReviewed          bool
+	confirmingMarkAll     bool
+	confirmingQuit        bool
+	showingHelp           bool
+	showingStats          bool
+	highRiskBanner        string
+	pendingReviewItem     *item
+	detailFlagIndex       int
+	showingFlagInfo       bool
+	flagList              list.Model
+	showingFlagList       bool
+	activeFlagFilter      string
+	filterSince           time.Time
+	filterUntil           time.Time
+	receivingData         bool
+	searchInput           textinput.Model
+	inSearchMode          bool
+	activeSearchQuery     string
+	help                  help.Model
+	showSidePane          bool
+	helpPage              int
+	helpPages             []string
+	maxRiskScore          int
+	minRiskScore          int
+	showingHeatmap        bool
+	heatmapZoom           float64
+	heatmapCenter         float64
+	heatmapFollow         bool
+	compactMode           bool
+	showFooterHelp        bool
+	showingCheatSheet     bool
+	commandInput          textinput.Model
+	showingCommandPalette bool
+	filteredCommands      []CommandItem
+	selectedCommand       int
+	latestHighRiskEntry   *LogEntry
+	commandHistory        []string
+	rpcUrls               []string
+	rpcFailover           bool
+	rpcLatency            time.Duration
+	newAlertInDetail      bool
+	detailData            *BlockchainData
+	loadingDetail         bool
 }
 
 type entriesMsg struct {
@@ -223,12 +423,24 @@ type entriesMsg struct {
 
 type clearAlertMsg struct{}
 
+type closeHighRiskAlertMsg struct{}
+
+type clearReceivingMsg struct{}
+
+type blockchainDataMsg struct {
+	contract string
+	data     *BlockchainData
+	usedURL  string
+	latency  time.Duration
+}
+
 type SortMode int
 
 const (
 	SortRiskDesc SortMode = iota
 	SortBlockDesc
 	SortBlockAsc
+	SortDeployer
 )
 
 func (s SortMode) String() string {
@@ -239,6 +451,8 @@ func (s SortMode) String() string {
 		return "Block (New-Old)"
 	case SortBlockAsc:
 		return "Block (Old-New)"
+	case SortDeployer:
+		return "Deployer"
 	default:
 		return "Unknown"
 	}
@@ -248,25 +462,175 @@ func (m model) Init() tea.Cmd {
 	return waitForFileChange(logFilePath, m.fileOffset)
 }
 
+func (m *model) resize(width, height int) {
+	m.windowWidth = width
+	m.windowHeight = height
+	_, v := appStyle.GetFrameSize()
+	footerHeight := lipgloss.Height(m.footerView())
+
+	availableWidth := width - 6
+	if m.showSidePane {
+		availableWidth -= sidePaneWidth
+	}
+	if availableWidth < 20 {
+		availableWidth = 20
+	}
+
+	m.list.SetSize(availableWidth, height-v-footerHeight)
+	m.viewport = viewport.New(width-6, height-v-footerHeight)
+}
+
+func (m model) jumpToHighRisk() (model, tea.Cmd) {
+	if m.latestHighRiskEntry != nil {
+		items := m.list.Items()
+		for i, it := range items {
+			if item, ok := it.(item); ok {
+				if item.Contract == m.latestHighRiskEntry.Contract && item.Block == m.latestHighRiskEntry.Block {
+					m.list.Select(i)
+					m.showingHeatmap = false
+					m.showingStats = false
+					m.showingCheatSheet = false
+					m.showingCommandPalette = false
+					m.showingHelp = false
+
+					m.showingDetail = true
+					m.showingJSON = false
+					m.newAlertInDetail = false
+					m.detailFlagIndex = 0
+					m.detailData = nil
+					m.loadingDetail = true
+					m.viewport.SetContent(renderDetail(item.LogEntry, m.windowWidth, m.detailFlagIndex, nil, true))
+					return m, fetchBlockchainData(m.rpcUrls, item.Contract, item.TxHash)
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
 
+	if m.showingHelp {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "esc", "q", "?":
+				m.showingHelp = false
+				m.resize(m.windowWidth, m.windowHeight) // Restore viewport for list
+				return m, nil
+			case "left", "h":
+				if m.helpPage > 0 {
+					m.helpPage--
+					m.viewport.SetContent(m.helpPages[m.helpPage])
+					m.viewport.GotoTop()
+				}
+				return m, nil
+			case "right", "l":
+				if m.helpPage < len(m.helpPages)-1 {
+					m.helpPage++
+					m.viewport.SetContent(m.helpPages[m.helpPage])
+					m.viewport.GotoTop()
+				}
+				return m, nil
+			}
+		}
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
+		return m, tea.Batch(cmds...)
+	}
+
+	if m.showingStats {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "esc", "q", "S":
+				m.showingStats = false
+				return m, nil
+			}
+		case tea.WindowSizeMsg:
+			m.resize(msg.Width, msg.Height)
+		}
+		return m, nil
+	}
+
+	if m.showingCommandPalette {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "esc":
+				m.showingCommandPalette = false
+				return m, nil
+			case "enter":
+				if len(m.filteredCommands) > 0 {
+					cmdID := m.filteredCommands[m.selectedCommand].ID
+					m.showingCommandPalette = false
+					m.commandInput.Reset()
+					m.filteredCommands = availableCommands // Reset for next time, though overwritten on open
+					return m.executeCommand(cmdID)
+				}
+			case "up", "ctrl+k":
+				if m.selectedCommand > 0 {
+					m.selectedCommand--
+				}
+			case "down", "ctrl+j":
+				if m.selectedCommand < len(m.filteredCommands)-1 {
+					m.selectedCommand++
+				}
+			default:
+				var cmd tea.Cmd
+				m.commandInput, cmd = m.commandInput.Update(msg)
+				val := strings.ToLower(m.commandInput.Value())
+				var newFiltered []CommandItem
+				sourceList := m.getCommandsWithHistory()
+				for _, c := range sourceList {
+					if strings.Contains(strings.ToLower(c.Title), val) || strings.Contains(strings.ToLower(c.Desc), val) {
+						newFiltered = append(newFiltered, c)
+					}
+				}
+				m.filteredCommands = newFiltered
+				m.selectedCommand = 0
+				return m, cmd
+			}
+		}
+		return m, nil
+	}
+
+	if m.showingCheatSheet {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "esc", "q", "K":
+				m.showingCheatSheet = false
+				return m, nil
+			}
+		}
+		return m, nil
+	}
+
+	if m.inSearchMode {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "enter":
+				m.activeSearchQuery = m.searchInput.Value()
+				m.inSearchMode = false
+				m.searchInput.Blur()
+				return m, m.updateListItems()
+			case "esc":
+				m.inSearchMode = false
+				m.searchInput.Blur()
+				return m, nil
+			}
+		}
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.windowWidth = msg.Width
-		m.windowHeight = msg.Height
-		// Adjust list height for the footer
-		_, v := appStyle.GetFrameSize()
-		footerHeight := lipgloss.Height(m.footerView())
-
-		listWidth := msg.Width - sidePaneWidth - 6 // 6 for padding/borders
-		if listWidth < 20 {
-			listWidth = 20
-		}
-
-		m.list.SetSize(listWidth, msg.Height-v-footerHeight)
-		m.viewport = viewport.New(msg.Width-6, msg.Height-v-footerHeight)
+		m.resize(msg.Width, msg.Height)
 		m.ready = true
 
 	case tea.KeyMsg:
@@ -293,37 +657,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if m.showingHelp {
-			if msg.String() == "esc" || msg.String() == "?" || msg.String() == "q" {
-				m.showingHelp = false
+		if m.confirmingMarkAll {
+			switch msg.String() {
+			case "y", "Y":
+				count := 0
+				for _, e := range m.items {
+					// Apply all filters to see if it's "visible"
+					if m.activeFlagFilter != "" {
+						hasFlag := false
+						for _, f := range e.Flags {
+							if f == m.activeFlagFilter {
+								hasFlag = true
+								break
+							}
+						}
+						if !hasFlag {
+							continue
+						}
+					}
+					if e.RiskScore < m.minRiskScore || e.RiskScore > m.maxRiskScore {
+						continue
+					}
+					// NOTE: Other filters like search, time are not applied here for simplicity,
+					// assuming "mark all" applies to the core filtered set.
+
+					key := getReviewKey(e)
+					if !m.reviewedSet[key] {
+						m.reviewedSet[key] = true
+						count++
+					}
+				}
+				saveReviewed(m.reviewedSet)
+				m.alertMsg = fmt.Sprintf("Marked %d events as reviewed", count)
+				m.confirmingMarkAll = false
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				}))
+			case "n", "N", "esc", "q":
+				m.confirmingMarkAll = false
 				return m, nil
 			}
 		}
 
-		if m.showingAbout {
+		if m.confirmingQuit {
 			switch msg.String() {
-			case "esc", "enter", "q", "a":
-				m.showingAbout = false
+			case "y", "Y":
+				return m, tea.Quit
+			case "n", "N", "esc", "q":
+				m.confirmingQuit = false
 				return m, nil
-			case "e", "E":
-				_ = clipboard.WriteAll("0x9b4FfDADD87022C8B7266e28ad851496115ffB48")
-				m.alertMsg = "Copied ETH Address"
-				return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
-					return clearAlertMsg{}
-				})
-			case "s", "S":
-				_ = clipboard.WriteAll("68L4XzSbRUaNE4UnxEd8DweSWEoiMQi6uygzERZLbXDw")
-				m.alertMsg = "Copied SOL Address"
-				return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
-					return clearAlertMsg{}
-				})
-			case "b", "B":
-				_ = clipboard.WriteAll("bc1qkmzc6d49fl0edyeynezwlrfqv486nmk6p5pmta")
-				m.alertMsg = "Copied BTC Address"
-				return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
-					return clearAlertMsg{}
-				})
 			}
+			// Ignore other keys while confirming quit.
 			return m, nil
 		}
 
@@ -336,12 +720,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "esc" || msg.String() == "q" {
 				m.showingDetail = false
 				m.showingJSON = false
+				m.newAlertInDetail = false
 				return m, nil
+			}
+			if key.Matches(msg, appKeys.JumpToAlert) {
+				return m.jumpToHighRisk()
 			}
 			if msg.String() == "J" {
 				m.showingJSON = !m.showingJSON
 				if i, ok := m.list.SelectedItem().(item); ok {
-					content := renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex)
+					content := renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex, m.detailData, m.loadingDetail)
 					if m.showingJSON {
 						content = renderJSON(i.LogEntry, m.windowWidth)
 					}
@@ -353,7 +741,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.detailFlagIndex > 0 {
 					m.detailFlagIndex--
 					if i, ok := m.list.SelectedItem().(item); ok && !m.showingJSON {
-						m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex))
+						m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex, m.detailData, m.loadingDetail))
 					}
 				}
 				return m, nil
@@ -363,11 +751,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.detailFlagIndex < len(i.LogEntry.Flags)-1 {
 						m.detailFlagIndex++
 						if !m.showingJSON {
-							m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex))
+							m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex, m.detailData, m.loadingDetail))
 						}
 					}
 				}
 				return m, nil
+			}
+			if msg.String() == "r" {
+				if i, ok := m.list.SelectedItem().(item); ok {
+					m.detailData = nil
+					m.loadingDetail = true
+					m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex, nil, true))
+					return m, fetchBlockchainData(m.rpcUrls, i.Contract, i.TxHash)
+				}
 			}
 
 			if key.Matches(msg, appKeys.Copy) {
@@ -403,12 +799,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch {
 		// These keys are handled by the list component
+		case msg.String() == "q":
+			if !m.list.SettingFilter() {
+				m.confirmingQuit = true
+				return m, nil
+			}
 		case msg.String() == "enter" || msg.String() == " ":
 			if i, ok := m.list.SelectedItem().(item); ok {
 				m.showingDetail = true
 				m.showingJSON = false
+				m.newAlertInDetail = false
 				m.detailFlagIndex = 0
-				m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex))
+				m.detailData = nil
+				m.loadingDetail = true
+				m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex, nil, true))
+				return m, fetchBlockchainData(m.rpcUrls, i.Contract, i.TxHash)
 			}
 		case key.Matches(msg, appKeys.Pause):
 			m.paused = !m.paused
@@ -421,6 +826,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, appKeys.Clear):
 			m.alertMsg = ""
 			m.activeFlagFilter = ""
+			m.activeSearchQuery = ""
+			m.searchInput.Reset()
+			m.minRiskScore = 0
+			m.maxRiskScore = 100
 			m.list.ResetFilter()
 			return m, m.updateListItems()
 		case key.Matches(msg, appKeys.Copy):
@@ -431,9 +840,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return clearAlertMsg{}
 				})
 			}
+		case key.Matches(msg, appKeys.CopyDeployer):
+			if i, ok := m.list.SelectedItem().(item); ok {
+				_ = clipboard.WriteAll(i.Deployer)
+				m.alertMsg = fmt.Sprintf("Copied Deployer %s", i.Deployer)
+				return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				})
+			}
 		case key.Matches(msg, appKeys.Sort):
-			m.sortMode = (m.sortMode + 1) % 3
-			sortEntries(m.items, m.sortMode)
+			m.sortMode = (m.sortMode + 1) % 4
+			sortEntries(m.items, m.sortMode, m.pinnedSet)
 			return m, m.updateListItems()
 		case key.Matches(msg, appKeys.Open):
 			if i, ok := m.list.SelectedItem().(item); ok {
@@ -449,11 +866,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingReviewItem = &i
 				return m, nil
 			}
+		case key.Matches(msg, appKeys.MarkAllReviewed):
+			m.confirmingMarkAll = true
+			return m, nil
 		case key.Matches(msg, appKeys.ToggleReviewed):
 			m.showReviewed = !m.showReviewed
 			return m, m.updateListItems()
+		case key.Matches(msg, appKeys.StatsView):
+			m.showingStats = !m.showingStats
+			return m, nil
+		case key.Matches(msg, appKeys.CheatSheet):
+			m.showingCheatSheet = !m.showingCheatSheet
+			return m, nil
+		case key.Matches(msg, appKeys.CommandPalette):
+			m.showingCommandPalette = !m.showingCommandPalette
+			if m.showingCommandPalette {
+				m.commandInput.Focus()
+				m.commandInput.SetValue("")
+				m.filteredCommands = m.getCommandsWithHistory()
+				m.selectedCommand = 0
+			}
+			return m, nil
 		case key.Matches(msg, appKeys.Help):
-			m.showingHelp = !m.showingHelp
+			if m.helpPages == nil {
+				m.generateHelpPages(m.windowWidth - 10)
+			}
+			m.showingHelp = true
+			m.helpPage = 0 // Overview & Controls
+			_, v := appStyle.GetFrameSize()
+			m.viewport.Height = m.windowHeight - v - 3
+			m.viewport.SetContent(m.helpPages[m.helpPage])
+			m.viewport.GotoTop()
 			return m, nil
 		case key.Matches(msg, appKeys.Watch):
 			if i, ok := m.list.SelectedItem().(item); ok {
@@ -470,9 +913,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return clearAlertMsg{}
 				}))
 			}
-		case key.Matches(msg, appKeys.About):
-			m.showingAbout = !m.showingAbout
-			return m, nil
+		case key.Matches(msg, appKeys.WatchDeployer):
+			if i, ok := m.list.SelectedItem().(item); ok {
+				deployer := i.Deployer
+				if m.watchedDeployersSet[deployer] {
+					delete(m.watchedDeployersSet, deployer)
+					m.alertMsg = fmt.Sprintf("Unwatched Deployer %s", deployer)
+				} else {
+					m.watchedDeployersSet[deployer] = true
+					m.alertMsg = fmt.Sprintf("Watching Deployer %s", deployer)
+				}
+				saveWatchedDeployers(m.watchedDeployersSet)
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				}))
+			}
+		case key.Matches(msg, appKeys.Pin):
+			if i, ok := m.list.SelectedItem().(item); ok {
+				contract := i.Contract
+				if m.pinnedSet[contract] {
+					delete(m.pinnedSet, contract)
+					m.alertMsg = fmt.Sprintf("Unpinned %s", contract)
+				} else {
+					m.pinnedSet[contract] = true
+					m.alertMsg = fmt.Sprintf("Pinned %s", contract)
+				}
+				savePinned(m.pinnedSet)
+				sortEntries(m.items, m.sortMode, m.pinnedSet)
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				}))
+			}
 		case key.Matches(msg, appKeys.FilterFlag):
 			// Populate flag list
 			var items []list.Item
@@ -509,10 +980,161 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}))
 			}
 			return m, nil
+		case key.Matches(msg, appKeys.Filter):
+			m.inSearchMode = true
+			m.searchInput.Focus()
+			return m, nil
+		case key.Matches(msg, appKeys.ToggleLegend):
+			m.showSidePane = !m.showSidePane
+			m.resize(m.windowWidth, m.windowHeight)
+			return m, nil
+		case key.Matches(msg, appKeys.IncreaseRisk):
+			if m.minRiskScore < m.maxRiskScore {
+				m.minRiskScore++
+				m.alertMsg = fmt.Sprintf("Risk Range: %d-%d", m.minRiskScore, m.maxRiskScore)
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				}))
+			}
+		case key.Matches(msg, appKeys.DecreaseRisk):
+			if m.minRiskScore > 0 {
+				m.minRiskScore--
+				m.alertMsg = fmt.Sprintf("Risk Range: %d-%d", m.minRiskScore, m.maxRiskScore)
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				}))
+			}
+		case key.Matches(msg, appKeys.IncreaseMaxRisk):
+			if m.maxRiskScore < 100 {
+				m.maxRiskScore++
+				m.alertMsg = fmt.Sprintf("Risk Range: %d-%d", m.minRiskScore, m.maxRiskScore)
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				}))
+			}
+		case key.Matches(msg, appKeys.DecreaseMaxRisk):
+			if m.maxRiskScore > m.minRiskScore {
+				m.maxRiskScore--
+				m.alertMsg = fmt.Sprintf("Risk Range: %d-%d", m.minRiskScore, m.maxRiskScore)
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				}))
+			}
+		case key.Matches(msg, appKeys.Heatmap):
+			m.showingHeatmap = !m.showingHeatmap
+			return m, nil
+		case key.Matches(msg, appKeys.Compact):
+			m.compactMode = !m.compactMode
+			delegate := list.NewDefaultDelegate()
+			delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder(), false, false, false, true).
+				BorderLeftForeground(lipgloss.Color("212")).
+				Foreground(lipgloss.Color("212")).
+				Padding(0, 0, 0, 1)
+			delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().
+				Foreground(lipgloss.Color("242"))
+			if m.compactMode {
+				delegate.SetHeight(2)
+			} else {
+				delegate.SetHeight(4)
+			}
+			m.list.SetDelegate(delegate)
+			return m, nil
+		case key.Matches(msg, appKeys.ToggleFooter):
+			m.showFooterHelp = !m.showFooterHelp
+			m.resize(m.windowWidth, m.windowHeight)
+			return m, nil
+		case key.Matches(msg, appKeys.HeatmapFollow):
+			m.heatmapFollow = !m.heatmapFollow
+			if m.heatmapFollow {
+				m.heatmapCenter = 1.0 - (0.5 / m.heatmapZoom)
+				if m.heatmapCenter < 0.5 {
+					m.heatmapCenter = 0.5
+				}
+			}
+			return m, nil
+		case key.Matches(msg, appKeys.JumpToAlert):
+			return m.jumpToHighRisk()
+		}
+
+		if m.showingHeatmap {
+			if msg.String() == "esc" || msg.String() == "q" {
+				m.showingHeatmap = false
+				return m, nil
+			}
+			switch {
+			case key.Matches(msg, appKeys.ZoomIn):
+				m.heatmapZoom *= 1.5
+				// Clamp center to keep view valid
+				halfSpan := 0.5 / m.heatmapZoom
+				if m.heatmapCenter < halfSpan {
+					m.heatmapCenter = halfSpan
+				} else if m.heatmapCenter > 1.0-halfSpan {
+					m.heatmapCenter = 1.0 - halfSpan
+				}
+				return m, nil
+			case key.Matches(msg, appKeys.ZoomOut):
+				m.heatmapZoom /= 1.5
+				if m.heatmapZoom < 1.0 {
+					m.heatmapZoom = 1.0
+				}
+				return m, nil
+			case key.Matches(msg, appKeys.HeatmapLeft):
+				m.heatmapFollow = false
+				m.heatmapCenter -= 0.1 / m.heatmapZoom
+				if m.heatmapCenter < 0.5/m.heatmapZoom {
+					m.heatmapCenter = 0.5 / m.heatmapZoom
+				}
+				return m, nil
+			case key.Matches(msg, appKeys.HeatmapRight):
+				m.heatmapFollow = false
+				m.heatmapCenter += 0.1 / m.heatmapZoom
+				if m.heatmapCenter > 1.0-0.5/m.heatmapZoom {
+					m.heatmapCenter = 1.0 - 0.5/m.heatmapZoom
+				}
+				return m, nil
+			case key.Matches(msg, appKeys.HeatmapReset):
+				m.heatmapZoom = 1.0
+				m.heatmapCenter = 0.5
+				m.heatmapFollow = true
+				return m, nil
+			}
 		}
 
 	case clearAlertMsg:
 		m.alertMsg = ""
+		return m, nil
+
+	case closeHighRiskAlertMsg:
+		m.highRiskBanner = ""
+		m.resize(m.windowWidth, m.windowHeight)
+		return m, nil
+
+	case clearReceivingMsg:
+		m.receivingData = false
+		return m, nil
+
+	case blockchainDataMsg:
+		if i, ok := m.list.SelectedItem().(item); ok && i.Contract == msg.contract {
+			m.loadingDetail = false
+			m.detailData = msg.data
+			if m.showingDetail && !m.showingJSON {
+				m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex, m.detailData, false))
+			}
+		}
+		m.rpcLatency = msg.latency
+		// Auto-rotate RPC URLs if a backup one was used successfully
+		if msg.usedURL != "" && len(m.rpcUrls) > 0 && m.rpcUrls[0] != msg.usedURL {
+			m.rpcFailover = true
+			var newUrls []string
+			newUrls = append(newUrls, msg.usedURL)
+			for _, u := range m.rpcUrls {
+				if u != msg.usedURL {
+					newUrls = append(newUrls, u)
+				}
+			}
+			m.rpcUrls = newUrls
+		}
 		return m, nil
 
 	case entriesMsg:
@@ -520,6 +1142,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // Optionally handle error display
 		}
 		if len(msg.entries) > 0 {
+			m.receivingData = true
+			cmds = append(cmds, tea.Tick(500*time.Millisecond, func(_ time.Time) tea.Msg {
+				return clearReceivingMsg{}
+			}))
+
 			// Update state
 			m.items = append(m.items, msg.entries...)
 			m.fileOffset = msg.offset
@@ -527,18 +1154,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateStats(msg.entries)
 
 			// Re-sort items
-			sortEntries(m.items, m.sortMode)
+			sortEntries(m.items, m.sortMode, m.pinnedSet)
 
 			if !m.paused {
 				cmds = append(cmds, m.updateListItems())
 
+				if m.heatmapFollow {
+					m.heatmapCenter = 1.0 - (0.5 / m.heatmapZoom)
+					if m.heatmapCenter < 0.5 {
+						m.heatmapCenter = 0.5
+					}
+				}
+
 				// Check for high risk to trigger alert
 				for _, e := range msg.entries {
 					if e.RiskScore >= 50 {
-						m.alertMsg = "⚠️  NEW HIGH RISK THREAT DETECTED ⚠️"
-						cmds = append(cmds, tea.Tick(3*time.Second, func(_ time.Time) tea.Msg {
-							return clearAlertMsg{}
-						}))
+						entryCopy := e
+						m.latestHighRiskEntry = &entryCopy
+						if !m.showingDetail {
+							m.highRiskBanner = " ⚠️  HIGH RISK DETECTED  (Press !) ⚠️ "
+							m.resize(m.windowWidth, m.windowHeight)
+							cmds = append(cmds, tea.Tick(3*time.Second, func(_ time.Time) tea.Msg {
+								return closeHighRiskAlertMsg{}
+							}))
+						} else {
+							m.newAlertInDetail = true
+						}
 						break
 					}
 				}
@@ -571,10 +1212,31 @@ func (m *model) updateListItems() tea.Cmd {
 				continue
 			}
 		}
+		if !m.filterSince.IsZero() && time.Unix(e.Timestamp, 0).Before(m.filterSince) {
+			continue
+		}
+		if !m.filterUntil.IsZero() && time.Unix(e.Timestamp, 0).After(m.filterUntil) {
+			continue
+		}
+		if e.RiskScore < m.minRiskScore || e.RiskScore > m.maxRiskScore {
+			continue
+		}
+		if m.activeSearchQuery != "" {
+			query := strings.ToLower(m.activeSearchQuery)
+			if !strings.Contains(strings.ToLower(e.Contract), query) &&
+				!strings.Contains(strings.ToLower(e.TxHash), query) &&
+				!strings.Contains(strings.ToLower(e.Deployer), query) &&
+				!strings.Contains(strings.ToLower(e.TokenType), query) {
+				continue
+			}
+		}
+
 		if m.showReviewed || !m.reviewedSet[getReviewKey(e)] {
 			visibleItems = append(visibleItems, item{
-				LogEntry: e,
-				watched:  m.watchlistSet[e.Contract],
+				LogEntry:        e,
+				watched:         m.watchlistSet[e.Contract],
+				pinned:          m.pinnedSet[e.Contract],
+				watchedDeployer: m.watchedDeployersSet[e.Deployer],
 			})
 		}
 	}
@@ -606,13 +1268,24 @@ func (m *model) updateStats(newEntries []LogEntry) {
 	}
 }
 
-func sortEntries(entries []LogEntry, mode SortMode) {
+func sortEntries(entries []LogEntry, mode SortMode, pinnedSet map[string]bool) {
 	sort.Slice(entries, func(i, j int) bool {
+		pinI := pinnedSet[entries[i].Contract]
+		pinJ := pinnedSet[entries[j].Contract]
+		if pinI != pinJ {
+			return pinI
+		}
+
 		switch mode {
 		case SortBlockDesc:
 			return entries[i].Block > entries[j].Block
 		case SortBlockAsc:
 			return entries[i].Block < entries[j].Block
+		case SortDeployer:
+			if entries[i].Deployer != entries[j].Deployer {
+				return entries[i].Deployer < entries[j].Deployer
+			}
+			return entries[i].Block > entries[j].Block
 		case SortRiskDesc:
 			fallthrough
 		default:
@@ -625,7 +1298,18 @@ func sortEntries(entries []LogEntry, mode SortMode) {
 }
 
 func (m model) footerView() string {
-	return footerStyle.Render(m.statsView())
+	var helpView string
+	if m.showFooterHelp {
+		helpView = m.renderHelp()
+	}
+	stats := m.statsView()
+	content := lipgloss.JoinVertical(lipgloss.Left, helpView, stats)
+
+	if m.highRiskBanner != "" {
+		banner := highRiskAlertStyle.Width(m.windowWidth - 6).Render(m.highRiskBanner)
+		content = lipgloss.JoinVertical(lipgloss.Left, banner, content)
+	}
+	return footerStyle.Render(content)
 }
 
 func (m model) View() string {
@@ -633,19 +1317,25 @@ func (m model) View() string {
 		return "Initializing..."
 	}
 
+	if m.confirmingQuit {
+		return m.renderConfirmation("Are you sure you want to quit?")
+	}
+
+	if m.confirmingMarkAll {
+		return m.renderConfirmation("Mark all currently filtered events as reviewed?")
+	}
+
 	if m.confirmingReview {
+		return m.renderConfirmation("Mark this event as reviewed?")
+	}
+
+	if m.inSearchMode {
 		h, v := appStyle.GetFrameSize()
 		dialog := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("62")).
 			Padding(1, 2).
-			Render(
-				lipgloss.JoinVertical(lipgloss.Center,
-					"Mark this event as reviewed?",
-					"",
-					"(y) Yes    (n) No",
-				),
-			)
+			Render(lipgloss.JoinVertical(lipgloss.Center, "Search Logs", "", m.searchInput.View()))
 		return appStyle.Render(lipgloss.Place(m.windowWidth-h, m.windowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
 	}
 
@@ -658,25 +1348,64 @@ func (m model) View() string {
 		return appStyle.Render(lipgloss.Place(m.windowWidth-h, m.windowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
 	}
 
-	if m.showingAbout {
-		return m.aboutView()
+	if m.showingHeatmap {
+		return m.heatmapView()
+	}
+
+	if m.showingStats {
+		return m.statsDashboardView()
+	}
+
+	if m.showingCheatSheet {
+		return m.renderCheatSheet()
+	}
+
+	if m.showingCommandPalette {
+		return m.renderCommandPalette()
 	}
 
 	if m.showingDetail {
-		return appStyle.Render(
-			fmt.Sprintf("%s\n\n%s\n\n(press esc to go back, J for raw JSON, h for tx hash)",
-				titleStyle.Render(" Event Details "),
-				m.viewport.View(),
-			),
+		header := titleStyle.Render(" Event Details ")
+		if m.newAlertInDetail {
+			header = lipgloss.JoinHorizontal(lipgloss.Left, header, criticalRiskStyle.Bold(true).Render(" ⚠️  NEW ALERT (Press !) "))
+		}
+
+		content := fmt.Sprintf("%s\n\n%s\n\n(press esc to go back, J for raw JSON, h for tx hash, o to open)",
+			header,
+			m.viewport.View(),
 		)
+
+		return appStyle.Render(content)
 	}
 
 	if m.showingHelp {
 		return m.helpView()
 	}
 
-	mainView := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), m.sideView())
+	var mainView string
+	if m.showSidePane {
+		mainView = lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), m.sideView())
+	} else {
+		mainView = m.list.View()
+	}
+
 	return appStyle.Render(lipgloss.JoinVertical(lipgloss.Left, mainView, m.footerView()))
+}
+
+func (m model) renderConfirmation(question string) string {
+	h, v := appStyle.GetFrameSize()
+	dialog := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Render(
+			lipgloss.JoinVertical(lipgloss.Center,
+				question,
+				"",
+				"(y) Yes    (n) No",
+			),
+		)
+	return appStyle.Render(lipgloss.Place(m.windowWidth-h, m.windowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
 }
 
 func (m model) sideView() string {
@@ -684,9 +1413,229 @@ func (m model) sideView() string {
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render
 
-	sb.WriteString(title("TOP RISKS") + "\n\n")
+	sb.WriteString(title("RECENT FLAGS (Last 10)") + "\n\n")
 
-	// Sort flags by count
+	// Calculate stats for last 10 items (by block/time)
+	recentItems := make([]LogEntry, len(m.items))
+	copy(recentItems, m.items)
+	sort.Slice(recentItems, func(i, j int) bool {
+		return recentItems[i].Block > recentItems[j].Block
+	})
+	if len(recentItems) > 10 {
+		recentItems = recentItems[:10]
+	}
+
+	flagCounts := make(map[string]int)
+	for _, item := range recentItems {
+		for _, f := range item.Flags {
+			flagCounts[f]++
+		}
+	}
+
+	type kv struct {
+		Key   string
+		Value int
+	}
+	var ss []kv
+	for k, v := range flagCounts {
+		ss = append(ss, kv{k, v})
+	}
+	sort.Slice(ss, func(i, j int) bool {
+		if ss[i].Value != ss[j].Value {
+			return ss[i].Value > ss[j].Value
+		}
+		return ss[i].Key < ss[j].Key
+	})
+
+	// Top 10
+	count := 0
+	maxVal := 0
+	if len(ss) > 0 {
+		maxVal = ss[0].Value
+	}
+
+	for _, kv := range ss {
+		if count >= 10 {
+			break
+		}
+		barWidth := 0
+		if maxVal > 0 {
+			barWidth = int(float64(kv.Value) / float64(maxVal) * 15)
+		}
+		bar := strings.Repeat("█", barWidth)
+
+		// Truncate key to fit 35 chars width
+		keyName := kv.Key
+		if len(keyName) > 28 {
+			keyName = keyName[:25] + "..."
+		}
+
+		sb.WriteString(fmt.Sprintf("%s\n%s %d\n", keyName, lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Render(bar), kv.Value))
+		count++
+	}
+
+	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Press ? for Help"))
+
+	return sidePaneStyle.Width(sidePaneWidth).Height(m.list.Height()).Render(sb.String())
+}
+
+func (m model) heatmapView() string {
+	if len(m.items) == 0 {
+		return appStyle.Render("No data for heatmap.")
+	}
+
+	width := m.windowWidth - 6
+	height := m.windowHeight - 8
+	if width < 10 || height < 10 {
+		return appStyle.Render("Window too small for heatmap.")
+	}
+
+	// Find block range
+	minBlock := m.items[0].Block
+	maxBlock := m.items[0].Block
+	for _, item := range m.items {
+		if item.Block < minBlock {
+			minBlock = item.Block
+		}
+		if item.Block > maxBlock {
+			maxBlock = item.Block
+		}
+	}
+
+	blockRange := maxBlock - minBlock
+	if blockRange == 0 {
+		blockRange = 1
+	}
+
+	// Apply Zoom
+	visibleRange := float64(blockRange) / m.heatmapZoom
+	centerBlock := float64(minBlock) + float64(blockRange)*m.heatmapCenter
+	viewMinBlock := int(centerBlock - visibleRange/2)
+	viewMaxBlock := int(centerBlock + visibleRange/2)
+	viewBlockRange := viewMaxBlock - viewMinBlock
+	if viewBlockRange == 0 {
+		viewBlockRange = 1
+	}
+
+	// Grid dimensions: Y axis = Risk 0-100 mapped to height
+	grid := make([][]int, height)
+	for i := range grid {
+		grid[i] = make([]int, width)
+	}
+
+	maxCount := 0
+	for _, item := range m.items {
+		if item.Block < viewMinBlock || item.Block > viewMaxBlock {
+			continue
+		}
+
+		x := int(float64(item.Block-viewMinBlock) / float64(viewBlockRange) * float64(width-1))
+		if x < 0 {
+			x = 0
+		}
+		if x >= width {
+			x = width - 1
+		}
+
+		y := int((1.0 - (float64(item.RiskScore) / 100.0)) * float64(height-1))
+		if y < 0 {
+			y = 0
+		}
+		if y >= height {
+			y = height - 1
+		}
+
+		grid[y][x]++
+		if grid[y][x] > maxCount {
+			maxCount = grid[y][x]
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render(" Risk Heatmap (X: Time/Block, Y: Risk) ") + "\n\n")
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			count := grid[y][x]
+			riskVal := 100 - int((float64(y)/float64(height-1))*100)
+			baseColor := safeRiskStyle
+			if riskVal > 75 {
+				baseColor = highRiskStyle
+			} else if riskVal > 50 {
+				baseColor = medRiskStyle
+			} else if riskVal > 10 {
+				baseColor = lowRiskStyle
+			}
+
+			if count > 0 {
+				intensity := float64(count) / float64(maxCount)
+				symbol := "·"
+				if intensity > 0.75 {
+					symbol = "█"
+				} else if intensity > 0.5 {
+					symbol = "▓"
+				} else if intensity > 0.25 {
+					symbol = "▒"
+				} else {
+					symbol = "░"
+				}
+				sb.WriteString(baseColor.Render(symbol))
+			} else {
+				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render("·"))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf("Block Range: %d - %d (Zoom: %.1fx)", viewMinBlock, viewMaxBlock, m.heatmapZoom)))
+	return appStyle.Render(sb.String())
+}
+
+func (m model) statsDashboardView() string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render(" Statistics Dashboard ") + "\n\n")
+
+	// Risk Score Distribution
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render("Risk Score Distribution") + "\n")
+	buckets := make([]int, 10)
+	maxBucketVal := 0
+	for _, e := range m.items {
+		idx := e.RiskScore / 10
+		if idx >= 10 {
+			idx = 9
+		}
+		buckets[idx]++
+		if buckets[idx] > maxBucketVal {
+			maxBucketVal = buckets[idx]
+		}
+	}
+
+	for i := 0; i < 10; i++ {
+		rangeLabel := fmt.Sprintf("%d-%d", i*10, (i*10)+9)
+		if i == 9 {
+			rangeLabel = "90-100"
+		}
+		count := buckets[i]
+		barWidth := 0
+		if maxBucketVal > 0 {
+			barWidth = int(float64(count) / float64(maxBucketVal) * 40)
+		}
+		bar := strings.Repeat("█", barWidth)
+		color := safeRiskStyle
+		if i*10 > 100 {
+			color = criticalRiskStyle
+		} else if i*10 > 75 {
+			color = highRiskStyle
+		} else if i*10 > 50 {
+			color = medRiskStyle
+		} else if i*10 > 10 {
+			color = lowRiskStyle
+		}
+		sb.WriteString(fmt.Sprintf("%-6s %s %d\n", rangeLabel, color.Render(bar), count))
+	}
+
+	sb.WriteString("\n" + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render("Top Flags") + "\n")
+	// Reuse flag stats logic
 	type kv struct {
 		Key   string
 		Value int
@@ -699,131 +1648,244 @@ func (m model) sideView() string {
 		return ss[i].Value > ss[j].Value
 	})
 
-	// Top 5
-	count := 0
-	maxVal := 0
-	if len(ss) > 0 {
-		maxVal = ss[0].Value
+	for i := 0; i < len(ss) && i < 10; i++ {
+		sb.WriteString(fmt.Sprintf("%-30s %d\n", ss[i].Key, ss[i].Value))
 	}
 
-	for _, kv := range ss {
-		if count >= 5 {
-			break
-		}
-		barWidth := 0
-		if maxVal > 0 {
-			barWidth = int(float64(kv.Value) / float64(maxVal) * 15)
-		}
-		bar := strings.Repeat("█", barWidth)
-		sb.WriteString(fmt.Sprintf("%s\n%s %d\n", kv.Key, lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Render(bar), kv.Value))
-		count++
+	return appStyle.Render(sb.String())
+}
+
+func (m model) renderCheatSheet() string {
+	shortcuts := []struct{ key, desc string }{
+		{"p", "Pause/Resume"}, {"c", "Clear alerts"},
+		{"/", "Search/Filter"}, {"y", "Copy contract"},
+		{"s", "Sort events"}, {"o", "Open browser"},
+		{"x", "Mark reviewed"}, {"X", "Mark all reviewed"},
+		{"H", "Toggle reviewed"}, {"w", "Watch address"},
+		{"P", "Pin contract"}, {"W", "Watch deployer"},
+		{"d", "Copy deployer"}, {"f", "Filter by flag"},
+		{"F", "Clear flag filter"}, {"L", "Toggle legend"},
+		{"S", "Stats dashboard"}, {"M", "Heatmap view"},
+		{"t", "Heatmap follow"}, {"+/-", "Zoom heatmap"},
+		{"0", "Reset zoom"}, {"h/l", "Scroll heatmap"},
+		{"[/]", "Min risk score"}, {"</>", "Max risk score"},
+		{"!", "Jump to alert"}, {"z", "Compact mode"},
+		{"V", "Toggle footer"}, {"?", "Toggle help"},
+		{"K", "Toggle cheat sheet"},
 	}
 
-	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Press ? for Help"))
+	mid := (len(shortcuts) + 1) / 2
+	col1 := shortcuts[:mid]
+	col2 := shortcuts[mid:]
 
-	return sidePaneStyle.Width(sidePaneWidth).Height(m.list.Height()).Render(sb.String())
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+
+	renderCol := func(items []struct{ key, desc string }) string {
+		var sb strings.Builder
+		for _, item := range items {
+			sb.WriteString(fmt.Sprintf("%s %s\n", keyStyle.Render(fmt.Sprintf("%-5s", item.key)), descStyle.Render(item.desc)))
+		}
+		return sb.String()
+	}
+
+	content := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().PaddingRight(4).Render(renderCol(col1)),
+		renderCol(col2),
+	)
+
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(1, 2).Render(
+		lipgloss.JoinVertical(lipgloss.Center,
+			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Keybinding Cheat Sheet"),
+			"",
+			content,
+		),
+	)
+	h, v := appStyle.GetFrameSize()
+	return appStyle.Render(lipgloss.Place(m.windowWidth-h, m.windowHeight-v, lipgloss.Center, lipgloss.Center, box))
+}
+
+func (m model) renderCommandPalette() string {
+	h, v := appStyle.GetFrameSize()
+
+	var listBuilder strings.Builder
+
+	maxItems := 8
+	start := 0
+	if m.selectedCommand > maxItems/2 {
+		start = m.selectedCommand - maxItems/2
+	}
+	end := start + maxItems
+	if end > len(m.filteredCommands) {
+		end = len(m.filteredCommands)
+		start = end - maxItems
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	for i := start; i < end; i++ {
+		cmd := m.filteredCommands[i]
+		style := lipgloss.NewStyle().PaddingLeft(2)
+		cursor := "  "
+		if i == m.selectedCommand {
+			style = style.Foreground(lipgloss.Color("205")).Bold(true).Background(lipgloss.Color("237"))
+			cursor = "> "
+		}
+		listBuilder.WriteString(style.Render(fmt.Sprintf("%s%s: %s", cursor, cmd.Title, cmd.Desc)) + "\n")
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Command Palette"),
+		"",
+		m.commandInput.View(),
+		"",
+		listBuilder.String(),
+	)
+
+	dialog := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(1, 2).Width(60).Render(content)
+	return appStyle.Render(lipgloss.Place(m.windowWidth-h, m.windowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
 }
 
 func (m model) helpView() string {
-	content := lipgloss.NewStyle().Width(m.windowWidth - 10).Render(
-		fmt.Sprintf(`
-%s
+	header := titleStyle.Render(" ETH Watchtower Help ")
 
-%s
-This tool monitors the Ethereum blockchain for suspicious contract deployments and transactions.
-
-%s
-🔴 %s: Critical threat detected. Immediate attention required.
-🟠 %s: Potential threat or suspicious activity.
-🟢 %s: Informational event or low risk.
-
-%s
-• %s: Pause/Resume live updates
-• %s: Clear active alerts
-• %s: Filter events (by contract, hash, etc)
-• %s: Copy contract address
-• %s: Sort events (Risk/Block)
-• %s: Open transaction in Etherscan
-• %s: Mark event as reviewed
-• %s: Toggle reviewed events visibility
-• %s: Watch/Unwatch address
-• %s: Toggle this help view
-• %s: Filter by specific flag
-• %s: Clear flag filter
-• %s: About & Donations
-
-%s
-ApprovalDetected: A token approval event was emitted.
-InfiniteApproval: An approval for unlimited tokens was detected.
-MintDetected:     Tokens were minted (created).
-
-(Press ? or esc to close)
-`,
-			titleStyle.Render(" ETH Watchtower Help "),
-			lipgloss.NewStyle().Bold(true).Render("Overview"),
-			lipgloss.NewStyle().Bold(true).Render("Risk Levels"),
-			highRiskStyle.Render("High Risk"),
-			medRiskStyle.Render("Medium Risk"),
-			lowRiskStyle.Render("Low Risk"),
-			lipgloss.NewStyle().Bold(true).Render("Controls"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("p"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("c"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("/"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("y"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("s"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("o"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("x"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("H"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("w"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("?"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("f"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("F"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("a"),
-			lipgloss.NewStyle().Bold(true).Render("Common Flags"),
-		),
+	pagination := fmt.Sprintf("Page %d of %d", m.helpPage+1, len(m.helpPages))
+	navHelp := "Use ←/→ to navigate pages, ↑/↓ to scroll, q to close."
+	footer := lipgloss.JoinHorizontal(lipgloss.Left,
+		lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(pagination),
+		lipgloss.NewStyle().Faint(true).MarginLeft(2).Render(navHelp),
 	)
-	return appStyle.Render(content)
-}
 
-func (m model) aboutView() string {
-	h, v := appStyle.GetFrameSize()
-
-	bold := lipgloss.NewStyle().Bold(true)
-
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(press esc to close)")
-	if m.alertMsg != "" {
-		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render(m.alertMsg)
-	}
-
-	content := lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(
-		lipgloss.JoinVertical(lipgloss.Center,
-			titleStyle.Render(" About ETH Watchtower "),
-			"",
-			"A real-time TUI for monitoring Ethereum contract deployments,",
-			"analyzing risks, and detecting suspicious patterns.",
-			"",
-			bold.Render("Support the Project"),
-			"",
-			bold.Render("(e) ETH/ERC20:")+" 0x9b4FfDADD87022C8B7266e28ad851496115ffB48",
-			bold.Render("(s) SOL:")+" 68L4XzSbRUaNE4UnxEd8DweSWEoiMQi6uygzERZLbXDw",
-			bold.Render("(b) BTC:")+" bc1qkmzc6d49fl0edyeynezwlrfqv486nmk6p5pmta",
-			"",
+	return appStyle.Render(
+		lipgloss.JoinVertical(lipgloss.Left,
+			header,
+			m.viewport.View(),
 			footer,
 		),
 	)
+}
 
-	dialog := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
-		Padding(2, 4).
-		Render(content)
+func (m *model) generateHelpPages(width int) {
+	m.helpPages = nil
 
-	return appStyle.Render(lipgloss.Place(m.windowWidth-h, m.windowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
+	// --- Page 0: About & Overview ---
+	bold := lipgloss.NewStyle().Bold(true)
+	aboutSection := lipgloss.JoinVertical(lipgloss.Center,
+		titleStyle.Render(" ETH Watchtower "),
+		"",
+		"A real-time TUI for monitoring Ethereum contract deployments,",
+		"analyzing risks, and detecting suspicious patterns.",
+		"",
+		bold.Render("Support the Project"),
+		"",
+		bold.Render("(e) ETH/ERC20:")+" 0x9b4FfDADD87022C8B7266e28ad851496115ffB48",
+		bold.Render("(s) SOL:")+" 68L4XzSbRUaNE4UnxEd8DweSWEoiMQi6uygzERZLbXDw",
+		bold.Render("(b) BTC:")+" bc1qkmzc6d49fl0edyeynezwlrfqv486nmk6p5pmta",
+	)
+
+	// Risk Levels Section
+	riskContent := fmt.Sprintf(`%s
+🔴 %s: Critical threat detected. Immediate attention required.
+🟠 %s: Potential threat or suspicious activity.
+🟢 %s: Informational event or low risk.`,
+		lipgloss.NewStyle().Bold(true).Render("Risk Levels"),
+		criticalRiskStyle.Render("Critical Risk (>100)"),
+		highRiskStyle.Render("High Risk (>75)"),
+		safeRiskStyle.Render("Safe/Low Risk (<=10)"),
+	)
+
+	// Controls Section
+	shortcuts := []struct{ key, desc string }{
+		{"p", "Pause/Resume"}, {"c", "Clear alerts"},
+		{"/", "Search/Filter"}, {"y", "Copy contract"},
+		{"s", "Sort events"}, {"o", "Open browser"},
+		{"x", "Mark reviewed"}, {"X", "Mark all reviewed"},
+		{"H", "Toggle reviewed"}, {"w", "Watch address"},
+		{"P", "Pin contract"}, {"W", "Watch deployer"},
+		{"d", "Copy deployer"}, {"f", "Filter by flag"},
+		{"F", "Clear flag filter"}, {"L", "Toggle legend"},
+		{"S", "Stats dashboard"}, {"M", "Heatmap view"},
+		{"t", "Heatmap follow"}, {"+/-", "Zoom heatmap"},
+		{"0", "Reset zoom"}, {"h/l", "Scroll heatmap"},
+		{"[/]", "Min risk score"}, {"</>", "Max risk score"},
+		{"!", "Jump to alert"}, {"z", "Compact mode"},
+		{"V", "Toggle footer"}, {"?", "Toggle help"},
+		{"K", "Toggle cheat sheet"},
+	}
+
+	mid := (len(shortcuts) + 1) / 2
+	col1 := shortcuts[:mid]
+	col2 := shortcuts[mid:]
+
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
+	renderCol := func(items []struct{ key, desc string }) string {
+		var sb strings.Builder
+		for _, item := range items {
+			sb.WriteString(fmt.Sprintf("• %s: %s\n", keyStyle.Render(item.key), item.desc))
+		}
+		return sb.String()
+	}
+
+	controlsView := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(width/2).Render(renderCol(col1)),
+		lipgloss.NewStyle().Width(width/2).Render(renderCol(col2)),
+	)
+
+	controlsContent := lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.NewStyle().Bold(true).Render("Controls"),
+		controlsView,
+	)
+
+	page0 := lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(aboutSection),
+		"\n",
+		lipgloss.NewStyle().Width(width).Render(riskContent),
+		"\n",
+		lipgloss.NewStyle().Width(width).Render(controlsContent),
+	)
+	m.helpPages = append(m.helpPages, page0)
+
+	// --- Pages 2...N: Flags ---
+	var allFlags []string
+	for flag := range flagDescriptions {
+		allFlags = append(allFlags, flag)
+	}
+	sortFlags(allFlags)
+
+	const flagsPerPage = 7
+	var pageBuilder strings.Builder
+	pageCount := 1
+
+	for i, flag := range allFlags {
+		if i%flagsPerPage == 0 {
+			if pageBuilder.Len() > 0 {
+				m.helpPages = append(m.helpPages, pageBuilder.String())
+				pageBuilder.Reset()
+				pageCount++
+			}
+			pageBuilder.WriteString(titleStyle.Render(fmt.Sprintf(" Flags & Descriptions (%d) ", pageCount)) + "\n\n")
+		}
+
+		desc := getFlagDescription(flag)
+		cat := getFlagCategory(flag)
+		wrappedDesc := lipgloss.NewStyle().Width(width - 4).Render(desc)
+
+		pageBuilder.WriteString(fmt.Sprintf("%s [%s]\n%s\n\n",
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render(flag),
+			lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(cat),
+			lipgloss.NewStyle().PaddingLeft(2).Render(wrappedDesc),
+		))
+	}
+	if pageBuilder.Len() > 0 {
+		m.helpPages = append(m.helpPages, pageBuilder.String())
+	}
 }
 
 func (m model) statsView() string {
 	statsView := fmt.Sprintf(
-		"Events: %d | Contracts: %d | Deployers: %d | High Risk: %d | Avg Risk: %.1f",
+		"Events: %d | Contracts: %d | Deployers: %d | ^Risk: %d | Avg: %.1f",
 		m.stats.TotalEvents,
 		m.stats.UniqueContracts,
 		m.stats.UniqueDeployers,
@@ -832,20 +1894,52 @@ func (m model) statsView() string {
 	)
 
 	statsView += fmt.Sprintf(" | Sort: %s", m.sortMode.String())
+	statsView += fmt.Sprintf(" | Risk: %d-%d", m.minRiskScore, m.maxRiskScore)
 
 	if m.showReviewed {
 		statsView += " | SHOWING REVIEWED"
+	}
+	if m.compactMode {
+		statsView += " | COMPACT"
 	}
 
 	if m.activeFlagFilter != "" {
 		statsView += fmt.Sprintf(" | FILTER: %s", m.activeFlagFilter)
 	}
 
+	if m.activeSearchQuery != "" {
+		statsView += fmt.Sprintf(" | SEARCH: %s", m.activeSearchQuery)
+	}
+
 	if m.paused {
 		statsView += " | PAUSED"
 	}
 
-	bottomView := statsStyle.Render(statsView)
+	if m.receivingData {
+		statsView += " | ⚡"
+	}
+
+	if len(m.rpcUrls) > 0 {
+		currentRPC := m.rpcUrls[0]
+		currentRPC = strings.TrimPrefix(currentRPC, "https://")
+		currentRPC = strings.TrimPrefix(currentRPC, "http://")
+		if len(currentRPC) > 25 {
+			currentRPC = currentRPC[:22] + "..."
+		}
+		statsView += fmt.Sprintf(" | RPC: %s", currentRPC)
+		if m.rpcLatency > 0 {
+			latencyStr := fmt.Sprintf(" (%s)", m.rpcLatency.Round(time.Millisecond))
+			if m.rpcLatency > 1*time.Second {
+				latencyStr = criticalRiskStyle.Render(latencyStr)
+			}
+			statsView += latencyStr
+		}
+		if m.rpcFailover {
+			statsView += " ⚠️"
+		}
+	}
+
+	bottomView := statsStyle.Width(m.windowWidth - 4).Render(statsView)
 	if m.alertMsg != "" {
 		bottomView = alertStyle.Render(m.alertMsg)
 	}
@@ -853,7 +1947,12 @@ func (m model) statsView() string {
 	return bottomView
 }
 
-func renderDetail(e LogEntry, width int, selectedFlagIdx int) string {
+func (m model) renderHelp() string {
+	keys := []key.Binding{appKeys.Pause, appKeys.Sort, appKeys.Open, appKeys.ToggleLegend, appKeys.Heatmap, appKeys.StatsView, appKeys.CheatSheet, appKeys.Help, appKeys.CommandPalette}
+	return m.help.ShortHelpView(keys)
+}
+
+func renderDetail(e LogEntry, width int, selectedFlagIdx int, data *BlockchainData, loading bool) string {
 	halfWidth := width/2 - 4
 	if halfWidth < 40 {
 		halfWidth = width - 4
@@ -868,17 +1967,24 @@ func renderDetail(e LogEntry, width int, selectedFlagIdx int) string {
 
 	// Left Pane: Metadata
 	var leftSb strings.Builder
-	leftSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#FAFAFA")).Background(lipgloss.Color("#7D56F4")).Padding(0, 1).Render("EVENT DETAILS") + "\n\n")
+	leftSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#FAFAFA")).Background(lipgloss.Color("#7D56F4")).Padding(0, 1).Render("DETAILS") + "\n\n")
 
 	renderLine(&leftSb, "Block", fmt.Sprintf("%d", e.Block))
+	if e.Timestamp != 0 {
+		renderLine(&leftSb, "Time", time.Unix(e.Timestamp, 0).Format("2006-01-02 15:04:05"))
+	}
 	renderLine(&leftSb, "Deployer", e.Deployer)
 	renderLine(&leftSb, "Token Type", e.TokenType)
 
-	riskColor := lowRiskStyle
-	if e.RiskScore >= 50 {
+	riskColor := safeRiskStyle
+	if e.RiskScore > 100 {
+		riskColor = criticalRiskStyle
+	} else if e.RiskScore > 75 {
 		riskColor = highRiskStyle
-	} else if e.RiskScore >= 20 {
+	} else if e.RiskScore > 50 {
 		riskColor = medRiskStyle
+	} else if e.RiskScore > 10 {
+		riskColor = lowRiskStyle
 	}
 	leftSb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("Risk Score:"), riskColor.Render(fmt.Sprintf("%d", e.RiskScore))))
 
@@ -910,6 +2016,38 @@ func renderDetail(e LogEntry, width int, selectedFlagIdx int) string {
 
 	rightSb.WriteString(styleLabel.Render("Transaction Hash") + "\n")
 	rightSb.WriteString(lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1).Width(halfWidth-4).Render(e.TxHash) + "\n\n")
+
+	rightSb.WriteString(styleLabel.Render("On-Chain Data") + "\n")
+	if loading {
+		rightSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("Loading...") + "\n\n")
+	} else if data != nil {
+		if data.Error != nil {
+			rightSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: "+data.Error.Error()) + "\n\n")
+		} else {
+			rightSb.WriteString(fmt.Sprintf("Balance: %s ETH\n", data.Balance))
+			rightSb.WriteString(fmt.Sprintf("Code Size: %d bytes\n", data.CodeSize))
+			rightSb.WriteString(fmt.Sprintf("Gas Used: %s\n", data.GasUsed))
+			statusColor := "196" // Red
+			if data.Status == "Success" {
+				statusColor = "46" // Green
+			}
+			rightSb.WriteString(fmt.Sprintf("Status: %s\n\n", lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Render(data.Status)))
+
+			rightSb.WriteString(styleLabel.Render("Input Data") + "\n")
+			if data.DecodedInput != "" {
+				rightSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render(data.DecodedInput) + "\n")
+			}
+			if data.InputData != "" {
+				displayInput := data.InputData
+				if len(displayInput) > 50 {
+					displayInput = displayInput[:47] + "..."
+				}
+				rightSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(displayInput) + "\n\n")
+			}
+		}
+	} else {
+		rightSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("No data fetched.") + "\n\n")
+	}
 
 	rightSb.WriteString(styleLabel.Render("Interface Analysis") + "\n")
 	interfaceInfo := "Unknown Interface"
@@ -943,6 +2081,173 @@ func renderDetail(e LogEntry, width int, selectedFlagIdx int) string {
 		return lipgloss.JoinVertical(lipgloss.Left, leftView, "\n", rightView)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftView, rightView)
+}
+
+func fetchBlockchainData(rpcURLs []string, contract, txHash string) tea.Cmd {
+	return func() tea.Msg {
+		if len(rpcURLs) == 0 {
+			return blockchainDataMsg{contract: contract, data: &BlockchainData{Error: fmt.Errorf("No RPC URLs configured")}}
+		}
+
+		data := &BlockchainData{Fetched: true}
+
+		type jsonRpcReq struct {
+			Jsonrpc string        `json:"jsonrpc"`
+			Method  string        `json:"method"`
+			Params  []interface{} `json:"params"`
+			ID      int           `json:"id"`
+		}
+
+		type jsonRpcRes struct {
+			Result json.RawMessage `json:"result"`
+			Error  *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+
+		call := func(rpcURL, method string, params []interface{}) (string, error) {
+			reqBody := jsonRpcReq{
+				Jsonrpc: "2.0",
+				Method:  method,
+				Params:  params,
+				ID:      1,
+			}
+			b, _ := json.Marshal(reqBody)
+			resp, err := http.Post(rpcURL, "application/json", bytes.NewReader(b))
+			if err != nil {
+				return "", err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == 429 {
+				return "", fmt.Errorf("rate limit exceeded (HTTP 429)")
+			}
+			var res jsonRpcRes
+			if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+				return "", err
+			}
+			if res.Error != nil {
+				return "", fmt.Errorf(res.Error.Message)
+			}
+			var result string
+			if err := json.Unmarshal(res.Result, &result); err != nil {
+				// Try unmarshalling as object for receipt
+				return string(res.Result), nil
+			}
+			return result, nil
+		}
+
+		var lastErr error
+		success := false
+		var successfulURL string
+		var latency time.Duration
+
+		for _, url := range rpcURLs {
+			start := time.Now()
+			// Try to fetch all data with this URL
+			// Get Balance
+			if balHex, err := call(url, "eth_getBalance", []interface{}{contract, "latest"}); err == nil {
+				if len(balHex) > 2 {
+					bal := new(big.Int)
+					bal.SetString(balHex[2:], 16)
+					bf := new(big.Float).SetInt(bal)
+					ethValue := new(big.Float).Quo(bf, big.NewFloat(1e18))
+					data.Balance = ethValue.Text('f', 4)
+				}
+			} else {
+				lastErr = err
+				continue // Try next URL
+			}
+
+			// Get Code
+			if codeHex, err := call(url, "eth_getCode", []interface{}{contract, "latest"}); err == nil {
+				data.CodeSize = (len(codeHex) - 2) / 2
+			} else {
+				lastErr = err
+				continue
+			}
+
+			// Get Receipt
+			if receiptJson, err := call(url, "eth_getTransactionReceipt", []interface{}{txHash}); err == nil {
+				var receipt struct {
+					GasUsed string `json:"gasUsed"`
+					Status  string `json:"status"`
+				}
+				if json.Unmarshal([]byte(receiptJson), &receipt) == nil {
+					gasUsed, _ := strconv.ParseUint(receipt.GasUsed[2:], 16, 64)
+					data.GasUsed = fmt.Sprintf("%d", gasUsed)
+					if receipt.Status == "0x1" {
+						data.Status = "Success"
+					} else {
+						data.Status = "Failed"
+					}
+				}
+			} else {
+				lastErr = err
+				continue
+			}
+
+			// Get Transaction (for Input Data)
+			if txJson, err := call(url, "eth_getTransactionByHash", []interface{}{txHash}); err == nil {
+				var tx struct {
+					Input string `json:"input"`
+				}
+				if json.Unmarshal([]byte(txJson), &tx) == nil {
+					data.InputData = tx.Input
+					data.DecodedInput = decodeInputData(tx.Input)
+				}
+			} else {
+				lastErr = err
+				continue
+			}
+
+			success = true
+			successfulURL = url
+			latency = time.Since(start)
+			break // All calls succeeded for this URL
+		}
+
+		if !success && lastErr != nil {
+			data.Error = lastErr
+		}
+
+		return blockchainDataMsg{contract: contract, data: data, usedURL: successfulURL, latency: latency}
+	}
+}
+
+func decodeInputData(input string) string {
+	if len(input) < 10 {
+		return ""
+	}
+	selector := input[:10]
+
+	formatAddr := func(s string) string {
+		if len(s) >= 40 {
+			return "0x" + s[len(s)-40:]
+		}
+		return s
+	}
+	formatUint := func(s string) string {
+		i := new(big.Int)
+		i.SetString(s, 16)
+		return i.String()
+	}
+
+	switch selector {
+	case "0xa9059cbb": // transfer(address,uint256)
+		if len(input) >= 138 {
+			return fmt.Sprintf("transfer(to: %s, amount: %s)", formatAddr(input[10:74]), formatUint(input[74:138]))
+		}
+		return "transfer(address,uint256)"
+	case "0x095ea7b3": // approve(address,uint256)
+		if len(input) >= 138 {
+			return fmt.Sprintf("approve(spender: %s, amount: %s)", formatAddr(input[10:74]), formatUint(input[74:138]))
+		}
+		return "approve(address,uint256)"
+	case "0x23b872dd": // transferFrom(address,address,uint256)
+		return "transferFrom(address,address,uint256)"
+	}
+	return ""
 }
 
 func renderJSON(e LogEntry, width int) string {
@@ -1002,6 +2307,39 @@ func readLogEntries(path string, offset int64) ([]LogEntry, int64, error) {
 	}
 
 	return entries, offset + bytesRead, nil
+}
+
+func readLogHistory(path string, limit int64) ([]LogEntry, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if stat.Size() < limit {
+		return nil, nil
+	}
+
+	reader := bufio.NewReader(io.LimitReader(file, limit))
+	var entries []LogEntry
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			var entry LogEntry
+			if json.Unmarshal(line, &entry) == nil {
+				sortFlags(entry.Flags)
+				entries = append(entries, entry)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return entries, nil
 }
 
 func openBrowser(url string) error {
@@ -1113,6 +2451,75 @@ func saveWatchlist(watchlist map[string]bool) error {
 		return err
 	}
 	return os.WriteFile(watchlistFilePath, data, 0644)
+}
+
+func loadPinned() (map[string]bool, error) {
+	data, err := os.ReadFile(pinnedFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]bool), nil
+		}
+		return nil, err
+	}
+	var pinned map[string]bool
+	if err := json.Unmarshal(data, &pinned); err != nil {
+		return make(map[string]bool), nil
+	}
+	return pinned, nil
+}
+
+func savePinned(pinned map[string]bool) error {
+	data, err := json.Marshal(pinned)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(pinnedFilePath, data, 0644)
+}
+
+func loadWatchedDeployers() (map[string]bool, error) {
+	data, err := os.ReadFile(watchedDeployersFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]bool), nil
+		}
+		return nil, err
+	}
+	var watched map[string]bool
+	if err := json.Unmarshal(data, &watched); err != nil {
+		return make(map[string]bool), nil
+	}
+	return watched, nil
+}
+
+func saveWatchedDeployers(watched map[string]bool) error {
+	data, err := json.Marshal(watched)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(watchedDeployersFilePath, data, 0644)
+}
+
+func loadCommandHistory() ([]string, error) {
+	data, err := os.ReadFile(commandHistoryFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+	var history []string
+	if err := json.Unmarshal(data, &history); err != nil {
+		return []string{}, nil
+	}
+	return history, nil
+}
+
+func saveCommandHistory(history []string) error {
+	data, err := json.Marshal(history)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(commandHistoryFilePath, data, 0644)
 }
 
 var flagDescriptions = map[string]string{
@@ -1283,7 +2690,8 @@ var flagCategories = map[string]string{
 	"TimestampDependence": "Security", "ChainIDCheck": "Security", "SuspiciousCodeSize": "Security",
 	"ReentrancyRisk": "Security", "MathOverflow": "Security", "LowLevelCall": "Security",
 	"LowLevelSend": "Security", "LowLevelTransfer": "Security", "OracleManipulationRisk": "Security",
-	"FlashLoan": "Security",
+	"FlashLoan": "Security", "FrontrunnableByTime": "Security", "Randomness": "Security",
+	"SelfDestruct": "Security", "Timestamp": "Security", "TxOrigin": "Security", "UncheckedCall": "Security",
 
 	// Scam
 	"FakeToken": "Scam", "TaxToken": "Scam", "FeeOnTransfer": "Scam", "HiddenMint": "Scam",
@@ -1296,7 +2704,7 @@ var flagCategories = map[string]string{
 	"HardcodedGasLimit": "Gas", "GasTokenMinting": "Gas", "CostlyLoop": "Gas", "GasGriefingLoop": "Gas",
 	"BlockStuffing": "Gas", "LoopDetected": "Gas", "InfiniteLoop": "Gas", "GasInLoop": "Gas",
 	"CallInLoop": "Gas", "DelegateCallInLoop": "Gas", "FactoryInLoop": "Gas", "SelfDestructInLoop": "Gas",
-	"GasDependentLoop": "Gas", "DoSGasLimit": "Gas", "GasLimitCheck": "Gas",
+	"GasDependentLoop": "Gas", "DoSGasLimit": "Gas", "GasLimitCheck": "Gas", "GasUsage": "Gas",
 
 	// Logic
 	"UnusedReturnValue": "Logic", "UncheckedReturnData": "Logic", "StrictBalanceEquality": "Logic",
@@ -1304,7 +2712,7 @@ var flagCategories = map[string]string{
 	"UncheckedMath": "Logic", "IncorrectInterface": "Logic", "ShadowingState": "Logic",
 	"IntegerTruncation": "Logic", "UninitializedLocalVariables": "Logic", "IncorrectConstructor": "Logic",
 	"UnusedEvent": "Logic", "DeadCode": "Logic", "GasPriceCheck": "Logic", "BlockNumberCheck": "Logic",
-	"TimestampCheck": "Logic",
+	"TimestampCheck": "Logic", "InterfaceCheck": "Logic",
 
 	// Info
 	"ApprovalDetected": "Info", "InfiniteApproval": "Info", "MintDetected": "Info", "Minting": "Info",
@@ -1317,7 +2725,9 @@ var flagCategories = map[string]string{
 	"Stakable": "Info", "StandardERC20": "Info", "Upgradable": "Info", "Whitelist": "Info",
 	"ContractFactory": "Info", "DelegateCall": "Info", "ProxySelectorClash": "Info",
 	"NonStandardProxy": "Info", "Metamorphic": "Info", "MetamorphicExploit": "Info", "ProxyDestruction": "Info",
-	"SuspiciousCall": "Info", "OwnerTransferCheck": "Info",
+	"SuspiciousCall": "Info", "OwnerTransferCheck": "Info", "LargeApproval": "Info", "LiquidityCreated": "Info",
+	"MintToDeployer": "Info", "MultipleMints": "Info", "NewContract": "Info", "RenounceOwnership": "Info",
+	"Stateless": "Info", "WhaleTransfer": "Info", "Withdrawal": "Info",
 }
 
 func getFlagCategory(flag string) string {
@@ -1354,41 +2764,347 @@ func getFlagDescription(flag string) string {
 	return "No description available for this flag."
 }
 
-func main() {
-	// Determine start offset to load approximately the last 100 events
-	var startOffset int64
-	if stat, err := os.Stat(logFilePath); err == nil {
-		if stat.Size() > 100*1024 { // 100KB buffer
-			startOffset = stat.Size() - 100*1024
+type CommandItem struct {
+	Title string
+	Desc  string
+	ID    string
+}
+
+var availableCommands = []CommandItem{
+	{"Pause/Resume Updates", "Toggle live updates", "pause"},
+	{"Clear Alerts", "Clear current alert messages", "clear_alerts"},
+	{"Toggle Legend", "Show/hide the side pane", "toggle_legend"},
+	{"Toggle Heatmap", "Show/hide the heatmap view", "toggle_heatmap"},
+	{"Toggle Stats", "Show/hide the statistics dashboard", "toggle_stats"},
+	{"Toggle Cheat Sheet", "Show/hide keybinding cheat sheet", "toggle_cheatsheet"},
+	{"Toggle Compact Mode", "Switch between compact and normal list view", "toggle_compact"},
+	{"Toggle Footer", "Show/hide the footer help", "toggle_footer"},
+	{"Mark All Reviewed", "Mark all visible items as reviewed", "mark_all_reviewed"},
+	{"Reset Heatmap Zoom", "Reset heatmap zoom and position", "reset_heatmap"},
+	{"Heatmap Follow Mode", "Toggle heatmap follow mode", "toggle_heatmap_follow"},
+	{"Clear Flag Filter", "Remove active flag filter", "clear_flag_filter"},
+	{"Toggle Reviewed", "Show/hide reviewed items", "toggle_reviewed"},
+	{"Help", "Show help screen", "help"},
+}
+
+func getCommandByID(id string) *CommandItem {
+	for _, c := range availableCommands {
+		if c.ID == id {
+			return &c
+		}
+	}
+	return nil
+}
+
+func (m model) getCommandsWithHistory() []CommandItem {
+	var result []CommandItem
+	seen := make(map[string]bool)
+
+	for _, id := range m.commandHistory {
+		if cmd := getCommandByID(id); cmd != nil {
+			if !seen[cmd.ID] {
+				result = append(result, *cmd)
+				seen[cmd.ID] = true
+			}
 		}
 	}
 
-	entries, offset, err := readLogEntries(logFilePath, startOffset)
+	for _, cmd := range availableCommands {
+		if !seen[cmd.ID] {
+			result = append(result, cmd)
+		}
+	}
+	return result
+}
+
+func (m model) executeCommand(id string) (model, tea.Cmd) {
+	// Update history
+	newHist := []string{id}
+	for _, h := range m.commandHistory {
+		if h != id {
+			newHist = append(newHist, h)
+		}
+	}
+	if len(newHist) > 20 {
+		newHist = newHist[:20]
+	}
+	m.commandHistory = newHist
+	saveCommandHistory(m.commandHistory)
+
+	var cmd tea.Cmd
+	switch id {
+	case "pause":
+		m.paused = !m.paused
+		if !m.paused {
+			m.alertMsg = ""
+			return m, m.updateListItems()
+		}
+	case "clear_alerts":
+		m.alertMsg = ""
+		m.activeFlagFilter = ""
+		m.activeSearchQuery = ""
+		m.searchInput.Reset()
+		m.minRiskScore = 0
+		m.maxRiskScore = 100
+		m.list.ResetFilter()
+		return m, m.updateListItems()
+	case "toggle_legend":
+		m.showSidePane = !m.showSidePane
+		m.resize(m.windowWidth, m.windowHeight)
+	case "toggle_heatmap":
+		m.showingHeatmap = !m.showingHeatmap
+	case "toggle_stats":
+		m.showingStats = !m.showingStats
+	case "toggle_cheatsheet":
+		m.showingCheatSheet = !m.showingCheatSheet
+	case "toggle_compact":
+		m.compactMode = !m.compactMode
+		delegate := list.NewDefaultDelegate()
+		delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, false, true).
+			BorderLeftForeground(lipgloss.Color("212")).
+			Foreground(lipgloss.Color("212")).
+			Padding(0, 0, 0, 1)
+		delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().
+			Foreground(lipgloss.Color("242"))
+		if m.compactMode {
+			delegate.SetHeight(2)
+		} else {
+			delegate.SetHeight(4)
+		}
+		m.list.SetDelegate(delegate)
+	case "toggle_footer":
+		m.showFooterHelp = !m.showFooterHelp
+		m.resize(m.windowWidth, m.windowHeight)
+	case "mark_all_reviewed":
+		m.confirmingMarkAll = true
+	case "reset_heatmap":
+		m.heatmapZoom = 1.0
+		m.heatmapCenter = 0.5
+		m.heatmapFollow = true
+	case "toggle_heatmap_follow":
+		m.heatmapFollow = !m.heatmapFollow
+		if m.heatmapFollow {
+			m.heatmapCenter = 1.0 - (0.5 / m.heatmapZoom)
+			if m.heatmapCenter < 0.5 {
+				m.heatmapCenter = 0.5
+			}
+		}
+	case "clear_flag_filter":
+		if m.activeFlagFilter != "" {
+			m.activeFlagFilter = ""
+			m.alertMsg = "Flag filter cleared"
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		}
+	case "toggle_reviewed":
+		m.showReviewed = !m.showReviewed
+		return m, m.updateListItems()
+	case "help":
+		if m.helpPages == nil {
+			m.generateHelpPages(m.windowWidth - 10)
+		}
+		m.showingHelp = true
+		m.helpPage = 0
+		_, v := appStyle.GetFrameSize()
+		m.viewport.Height = m.windowHeight - v - 3
+		m.viewport.SetContent(m.helpPages[m.helpPage])
+		m.viewport.GotoTop()
+	}
+	return m, cmd
+}
+
+type Config struct {
+	LogFilePath              string   `json:"logFilePath"`
+	StateFilePath            string   `json:"stateFilePath"`
+	ReviewedFilePath         string   `json:"reviewedFilePath"`
+	WatchlistFilePath        string   `json:"watchlistFilePath"`
+	PinnedFilePath           string   `json:"pinnedFilePath"`
+	WatchedDeployersFilePath string   `json:"watchedDeployersFilePath"`
+	CommandHistoryFilePath   string   `json:"commandHistoryFilePath"`
+	ResetState               bool     `json:"resetState"`
+	MinRiskScore             int      `json:"minRiskScore"`
+	MaxRiskScore             int      `json:"maxRiskScore"`
+	RpcUrls                  []string `json:"rpcUrls"`
+}
+
+func loadConfig() Config {
+	c := Config{
+		LogFilePath:              logFilePath,
+		StateFilePath:            stateFilePath,
+		ReviewedFilePath:         reviewedFilePath,
+		WatchlistFilePath:        watchlistFilePath,
+		PinnedFilePath:           pinnedFilePath,
+		WatchedDeployersFilePath: watchedDeployersFilePath,
+		CommandHistoryFilePath:   commandHistoryFilePath,
+		ResetState:               false,
+		MinRiskScore:             10,
+		MaxRiskScore:             300,
+		RpcUrls:                  []string{"https://eth.llamarpc.com"},
+	}
+
+	if data, err := os.ReadFile("config.json"); err == nil {
+		_ = json.Unmarshal(data, &c)
+	}
+	return c
+}
+
+func createDefaultConfig() {
+	c := Config{
+		LogFilePath:              "eth-watchtower.jsonl",
+		StateFilePath:            "eth-watchtower.state",
+		ReviewedFilePath:         "eth-watchtower.reviewed",
+		WatchlistFilePath:        "eth-watchtower.watchlist",
+		PinnedFilePath:           "eth-watchtower.pinned",
+		WatchedDeployersFilePath: "eth-watchtower.watched_deployers",
+		CommandHistoryFilePath:   "eth-watchtower.command_history",
+		ResetState:               false,
+		MinRiskScore:             10,
+		MaxRiskScore:             300,
+		RpcUrls:                  []string{"https://eth.llamarpc.com"},
+	}
+
+	if _, err := os.Stat("config.json"); err == nil {
+		fmt.Println("config.json already exists")
+		return
+	}
+
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		fmt.Printf("Error generating config: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile("config.json", data, 0644); err != nil {
+		fmt.Printf("Error writing config.json: %v\n", err)
+		return
+	}
+	fmt.Println("Generated default config.json")
+}
+
+func parseTimeFilter(input string) (time.Time, error) {
+	if input == "" {
+		return time.Time{}, nil
+	}
+	if d, err := time.ParseDuration(input); err == nil {
+		return time.Now().Add(-d), nil
+	}
+	return time.Parse(time.RFC3339, input)
+}
+
+func main() {
+	cfg := loadConfig()
+
+	if cfg.LogFilePath != "" {
+		logFilePath = cfg.LogFilePath
+	}
+	if cfg.StateFilePath != "" {
+		stateFilePath = cfg.StateFilePath
+	}
+	if cfg.ReviewedFilePath != "" {
+		reviewedFilePath = cfg.ReviewedFilePath
+	}
+	if cfg.WatchlistFilePath != "" {
+		watchlistFilePath = cfg.WatchlistFilePath
+	}
+	if cfg.PinnedFilePath != "" {
+		pinnedFilePath = cfg.PinnedFilePath
+	}
+	if cfg.WatchedDeployersFilePath != "" {
+		watchedDeployersFilePath = cfg.WatchedDeployersFilePath
+	}
+	if cfg.CommandHistoryFilePath != "" {
+		commandHistoryFilePath = cfg.CommandHistoryFilePath
+	}
+
+	resetState := flag.Bool("reset-state", cfg.ResetState, "Reset state and read from beginning (ignore saved history position)")
+	initConfig := flag.Bool("init-config", false, "Generate a default config.json file if one doesn't exist")
+	sinceFlag := flag.String("since", "", "Filter logs since this time (duration like 1h or RFC3339 timestamp)")
+	untilFlag := flag.String("until", "", "Filter logs until this time (duration like 1h or RFC3339 timestamp)")
+	minRiskFlag := flag.Int("min-risk", cfg.MinRiskScore, "Minimum risk score to display")
+	maxRiskFlag := flag.Int("max-risk", cfg.MaxRiskScore, "Maximum risk score to display")
+	flag.Parse()
+
+	if *initConfig {
+		createDefaultConfig()
+		return
+	}
+
+	if flag.NArg() > 0 {
+		logFilePath = flag.Arg(0)
+	}
+
+	filterSince, err := parseTimeFilter(*sinceFlag)
+	if err != nil {
+		fmt.Printf("Error parsing since time: %v\n", err)
+		os.Exit(1)
+	}
+	filterUntil, err := parseTimeFilter(*untilFlag)
+	if err != nil {
+		fmt.Printf("Error parsing until time: %v\n", err)
+		os.Exit(1)
+	}
+
+	var savedOffset int64
+	if !*resetState {
+		savedOffset, _ = loadState()
+	}
+
+	// Handle file truncation or reset
+	if stat, err := os.Stat(logFilePath); err == nil {
+		if stat.Size() < savedOffset {
+			savedOffset = 0
+		}
+	}
+
+	// Read history (0 to savedOffset) - No alerts for these
+	var history []LogEntry
+	if savedOffset > 0 {
+		var err error
+		history, err = readLogHistory(logFilePath, savedOffset)
+		if err != nil {
+			fmt.Printf("Error reading log history: %v\n", err)
+			// Fallback to reading everything as new if history fails
+			savedOffset = 0
+			history = nil
+		}
+	}
+
+	// Read recent (savedOffset to EOF) - These are "new" since last run
+	recent, offset, err := readLogEntries(logFilePath, savedOffset)
 	if err != nil {
 		fmt.Printf("Error reading log file: %v\n", err)
 		os.Exit(1)
 	}
 
+	entries := append(history, recent...)
+
 	// Keep only the last 100 entries
-	if len(entries) > 100 {
+	if len(entries) > 100 && filterSince.IsZero() && filterUntil.IsZero() {
 		entries = entries[len(entries)-100:]
 	}
 
 	reviewed, _ := loadReviewed()
 	watchlist, _ := loadWatchlist()
+	pinned, _ := loadPinned()
+	watchedDeployers, _ := loadWatchedDeployers()
+	commandHistory, _ := loadCommandHistory()
+
 	// Initial sort
 	sort.Slice(entries, func(i, j int) bool {
+		if pinned[entries[i].Contract] != pinned[entries[j].Contract] {
+			return pinned[entries[i].Contract]
+		}
 		if entries[i].RiskScore != entries[j].RiskScore {
 			return entries[i].RiskScore > entries[j].RiskScore
 		}
 		return entries[i].Block > entries[j].Block
 	})
 
-	items := make([]list.Item, len(entries))
 	var initialListItems []list.Item
-	for i, e := range entries {
-		it := item{LogEntry: e, watched: watchlist[e.Contract]}
-		items[i] = it
+	for _, e := range entries {
+		it := item{LogEntry: e, watched: watchlist[e.Contract], pinned: pinned[e.Contract], watchedDeployer: watchedDeployers[e.Deployer]}
 		if !reviewed[getReviewKey(e)] {
 			initialListItems = append(initialListItems, it)
 		}
@@ -1402,30 +3118,62 @@ func main() {
 		Padding(0, 0, 0, 1)
 	delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().
 		Foreground(lipgloss.Color("242"))
+	delegate.SetHeight(4) // Increase height to accommodate multi-line flags
 
 	l := list.New(initialListItems, delegate, 0, 0)
 	l.Title = "🚨 ETH Watchtower Alerts"
-	l.SetShowHelp(true)
-	l.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{appKeys.Pause, appKeys.Clear, appKeys.Filter, appKeys.FilterFlag, appKeys.ClearFlagFilter, appKeys.Copy, appKeys.Sort, appKeys.Open, appKeys.Review, appKeys.ToggleReviewed, appKeys.Watch, appKeys.Help, appKeys.About}
-	}
-	l.AdditionalFullHelpKeys = func() []key.Binding {
-		return []key.Binding{appKeys.Pause, appKeys.Clear, appKeys.Filter, appKeys.FilterFlag, appKeys.ClearFlagFilter, appKeys.Copy, appKeys.Sort, appKeys.Open, appKeys.Review, appKeys.ToggleReviewed, appKeys.Watch, appKeys.Help, appKeys.About}
-	}
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(false) // Disable default list filtering in favor of custom search
+
+	ti := textinput.New()
+	ti.Placeholder = "Contract, TxHash, Deployer..."
+	ti.CharLimit = 156
+	ti.Width = 40
+
+	ci := textinput.New()
+	ci.Placeholder = "Type a command..."
+	ci.Width = 40
 
 	m := model{
 		list:  l,
 		items: entries,
 		// Initialize state
-		fileOffset:   offset,
-		contractsSet: make(map[string]bool),
-		deployersSet: make(map[string]bool),
-		reviewedSet:  reviewed,
-		watchlistSet: watchlist,
+		fileOffset:          offset,
+		contractsSet:        make(map[string]bool),
+		deployersSet:        make(map[string]bool),
+		reviewedSet:         reviewed,
+		watchlistSet:        watchlist,
+		pinnedSet:           pinned,
+		watchedDeployersSet: watchedDeployers,
+		filterSince:         filterSince,
+		filterUntil:         filterUntil,
+		searchInput:         ti,
+		help:                help.New(),
+		showSidePane:        false,
+		maxRiskScore:        *maxRiskFlag,
+		minRiskScore:        *minRiskFlag,
+		heatmapZoom:         1.0,
+		heatmapCenter:       0.5,
+		heatmapFollow:       true,
+		showFooterHelp:      true,
+		commandInput:        ci,
+		filteredCommands:    availableCommands,
+		commandHistory:      commandHistory,
+		rpcUrls:             cfg.RpcUrls,
 	}
 
 	// Calculate initial stats
 	m.updateStats(entries)
+
+	// Check for high risk in recent entries (missed while closed)
+	for _, e := range recent {
+		if e.RiskScore >= 50 {
+			entryCopy := e
+			m.latestHighRiskEntry = &entryCopy
+			m.highRiskBanner = " ⚠️  HIGH RISK DETECTED (MISSED) ⚠️ "
+			break
+		}
+	}
 
 	// Save the updated offset immediately
 	saveState(offset)

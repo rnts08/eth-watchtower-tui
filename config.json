@@ -1,0 +1,15 @@
+{
+  "logFilePath": "eth-watchtower.jsonl",
+  "stateFilePath": "eth-watchtower.state",
+  "reviewedFilePath": "eth-watchtower.reviewed",
+  "watchlistFilePath": "eth-watchtower.watchlist",
+  "pinnedFilePath": "eth-watchtower.pinned",
+  "watchedDeployersFilePath": "eth-watchtower.watched_deployers",
+  "commandHistoryFilePath": "eth-watchtower.command_history",
+  "resetState": false,
+  "minRiskScore": 10,
+  "maxRiskScore": 300,
+  "rpcUrls": [
+    "https://eth.llamarpc.com"
+  ]
+}
