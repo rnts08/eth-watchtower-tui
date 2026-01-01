@@ -1,6 +1,17 @@
-*.state
-*.jsonl
-*.reference
-*.watchlist
-*.reviewed
+# Binaries
 eth-watchtower-tui
+dist/
+builds/
+
+# Logs and Data
+*.jsonl
+*.log
+
+# Application State
+eth-watchtower.state
+eth-watchtower.reviewed
+eth-watchtower.watchlist
+eth-watchtower.pinned
+eth-watchtower.watched_deployers
+eth-watchtower.command_history
+eth-watchtower.bin*

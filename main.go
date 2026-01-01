@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -25,18 +26,26 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"eth-watchtower-tui/config"
+	"eth-watchtower-tui/data"
+	"eth-watchtower-tui/stats"
+	"eth-watchtower-tui/tui"
+	"eth-watchtower-tui/util"
+)
+
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 var logFilePath = "eth-watchtower.jsonl"
 
-var stateFilePath = "eth-watchtower.state"
-var reviewedFilePath = "eth-watchtower.reviewed"
-var watchlistFilePath = "eth-watchtower.watchlist"
-var pinnedFilePath = "eth-watchtower.pinned"
-var watchedDeployersFilePath = "eth-watchtower.watched_deployers"
-var commandHistoryFilePath = "eth-watchtower.command_history"
+var stateFilePath = "eth-watchtower.bin"
 
-const sidePaneWidth = 35
+const defaultSidePaneWidth = 30
+const maxBackups = 5 // Number of state file backups to keep
 
 var (
 	appStyle = lipgloss.NewStyle().Padding(1, 2)
@@ -82,41 +91,47 @@ var (
 
 // keyMap defines a set of keybindings.
 type keyMap struct {
-	Pause           key.Binding
-	Clear           key.Binding
-	Filter          key.Binding
-	Copy            key.Binding
-	Sort            key.Binding
-	Open            key.Binding
-	Review          key.Binding
-	ToggleReviewed  key.Binding
-	Help            key.Binding
-	Watch           key.Binding
-	FilterFlag      key.Binding
-	ClearFlagFilter key.Binding
-	ToggleLegend    key.Binding
-	Pin             key.Binding
-	CopyDeployer    key.Binding
-	WatchDeployer   key.Binding
-	IncreaseRisk    key.Binding
-	DecreaseRisk    key.Binding
-	Heatmap         key.Binding
-	ZoomIn          key.Binding
-	ZoomOut         key.Binding
-	HeatmapReset    key.Binding
-	HeatmapLeft     key.Binding
-	HeatmapRight    key.Binding
-	Compact         key.Binding
-	ToggleFooter    key.Binding
-	HeatmapFollow   key.Binding
-	JumpToAlert     key.Binding
-	MarkAllReviewed key.Binding
-	IncreaseMaxRisk key.Binding
-	DecreaseMaxRisk key.Binding
-	StatsView       key.Binding
-	CheatSheet      key.Binding
-	CommandPalette  key.Binding
+	Pause                key.Binding
+	Clear                key.Binding
+	Filter               key.Binding
+	Copy                 key.Binding
+	Sort                 key.Binding
+	Open                 key.Binding
+	Review               key.Binding
+	ToggleReviewed       key.Binding
+	Help                 key.Binding
+	Watch                key.Binding
+	FilterFlag           key.Binding
+	ClearFlagFilter      key.Binding
+	ToggleLegend         key.Binding
+	Pin                  key.Binding
+	CopyDeployer         key.Binding
+	WatchDeployer        key.Binding
+	IncreaseRisk         key.Binding
+	DecreaseRisk         key.Binding
+	Heatmap              key.Binding
+	ZoomIn               key.Binding
+	ZoomOut              key.Binding
+	HeatmapReset         key.Binding
+	HeatmapLeft          key.Binding
+	HeatmapRight         key.Binding
+	Compact              key.Binding
+	ToggleFooter         key.Binding
+	HeatmapFollow        key.Binding
+	JumpToAlert          key.Binding
+	MarkAllReviewed      key.Binding
+	IncreaseMaxRisk      key.Binding
+	DecreaseMaxRisk      key.Binding
+	StatsView            key.Binding
+	CheatSheet           key.Binding
+	CommandPalette       key.Binding
+	IncreaseSidePane     key.Binding
+	DecreaseSidePane     key.Binding
+	FilterTokenType      key.Binding
+	ClearTokenTypeFilter key.Binding
 }
+
+var footerHelpKeys = []key.Binding{appKeys.Pause, appKeys.Sort, appKeys.Open, appKeys.ToggleLegend, appKeys.Heatmap, appKeys.StatsView, appKeys.CheatSheet, appKeys.Help, appKeys.CommandPalette}
 
 // appKeys defines the keybindings for the application.
 var appKeys = keyMap{
@@ -222,24 +237,23 @@ var appKeys = keyMap{
 	CommandPalette: key.NewBinding(
 		key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "command palette"),
 	),
-}
-
-// LogEntry represents a single line in the jsonl file.
-type LogEntry struct {
-	Contract     string   `json:"contract"`
-	Deployer     string   `json:"deployer"`
-	Block        int      `json:"block"`
-	Timestamp    int64    `json:"timestamp"`
-	TokenType    string   `json:"tokenType"`
-	MintDetected bool     `json:"mintDetected"`
-	RiskScore    int      `json:"riskScore"`
-	Flags        []string `json:"flags"`
-	TxHash       string   `json:"txHash"`
+	IncreaseSidePane: key.NewBinding(
+		key.WithKeys("}"), key.WithHelp("}", "inc side pane"),
+	),
+	DecreaseSidePane: key.NewBinding(
+		key.WithKeys("{"), key.WithHelp("{", "dec side pane"),
+	),
+	FilterTokenType: key.NewBinding(
+		key.WithKeys("e"), key.WithHelp("e", "filter token type"),
+	),
+	ClearTokenTypeFilter: key.NewBinding(
+		key.WithKeys("E"), key.WithHelp("E", "clear token type"),
+	),
 }
 
 // item implements list.Item interface.
 type item struct {
-	LogEntry
+	stats.LogEntry
 	watched         bool
 	pinned          bool
 	watchedDeployer bool
@@ -247,19 +261,19 @@ type item struct {
 
 func (i item) Title() string {
 	riskIcon := "🟢"
-	barColor := "#00FF00" // Green
+	style := safeRiskStyle
 	if i.RiskScore > 99 {
 		riskIcon = "🔴"
-		barColor = "#FF0000"
+		style = criticalRiskStyle
 	} else if i.RiskScore > 74 {
 		riskIcon = "🟠"
-		barColor = "#FFA500"
+		style = highRiskStyle
 	} else if i.RiskScore > 49 {
 		riskIcon = "🟡"
-		barColor = "#FFFF00"
+		style = medRiskStyle
 	} else if i.RiskScore > 24 {
 		riskIcon = "🟡"
-		barColor = "#FFFACD"
+		style = lowRiskStyle
 	}
 
 	// Visual Risk Bar
@@ -272,7 +286,7 @@ func (i item) Title() string {
 		filled = 1
 	}
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-	coloredBar := lipgloss.NewStyle().Foreground(lipgloss.Color(barColor)).Render(bar)
+	coloredBar := style.Render(bar)
 
 	watchedPrefix := ""
 	if i.watched {
@@ -325,16 +339,6 @@ func (i flagItem) Title() string       { return fmt.Sprintf("%s (%d)", i.name, i
 func (i flagItem) Description() string { return i.desc }
 func (i flagItem) FilterValue() string { return i.name }
 
-// Stats holds the calculated statistics.
-type Stats struct {
-	TotalEvents     int
-	UniqueContracts int
-	UniqueDeployers int
-	HighRiskCount   int
-	AvgRisk         float64
-	FlagCounts      map[string]int
-}
-
 type BlockchainData struct {
 	Balance      string
 	CodeSize     int
@@ -349,8 +353,8 @@ type BlockchainData struct {
 type model struct {
 	list          list.Model
 	viewport      viewport.Model
-	items         []LogEntry
-	stats         Stats
+	items         []stats.LogEntry
+	stats         *stats.Stats
 	ready         bool
 	showingDetail bool
 	showingJSON   bool
@@ -359,9 +363,6 @@ type model struct {
 
 	// State for live updates
 	fileOffset            int64
-	contractsSet          map[string]bool
-	deployersSet          map[string]bool
-	sumRisk               int
 	alertMsg              string
 	paused                bool
 	reviewedSet           map[string]bool
@@ -378,9 +379,6 @@ type model struct {
 	highRiskBanner        string
 	pendingReviewItem     *item
 	detailFlagIndex       int
-	showingFlagInfo       bool
-	flagList              list.Model
-	showingFlagList       bool
 	activeFlagFilter      string
 	filterSince           time.Time
 	filterUntil           time.Time
@@ -405,7 +403,7 @@ type model struct {
 	showingCommandPalette bool
 	filteredCommands      []CommandItem
 	selectedCommand       int
-	latestHighRiskEntry   *LogEntry
+	latestHighRiskEntry   *stats.LogEntry
 	commandHistory        []string
 	rpcUrls               []string
 	rpcFailover           bool
@@ -413,10 +411,18 @@ type model struct {
 	newAlertInDetail      bool
 	detailData            *BlockchainData
 	loadingDetail         bool
+	programStart          time.Time
+	sidePaneWidth         int
+	activeTokenTypeFilter string
+	filterList            list.Model
+	showingFilterList     bool
+	filterListType        string // "flag", "tokenType"
+	inTimeFilterMode      bool
+	timeFilterType        string // "since" or "until"
 }
 
 type entriesMsg struct {
-	entries []LogEntry
+	entries []stats.LogEntry
 	offset  int64
 	err     error
 }
@@ -458,8 +464,8 @@ func (s SortMode) String() string {
 	}
 }
 
-func (m model) Init() tea.Cmd {
-	return waitForFileChange(logFilePath, m.fileOffset)
+func (m *model) Init() tea.Cmd {
+	return tea.Batch(waitForFileChange(logFilePath, m.fileOffset), m.updateListItems())
 }
 
 func (m *model) resize(width, height int) {
@@ -470,7 +476,7 @@ func (m *model) resize(width, height int) {
 
 	availableWidth := width - 6
 	if m.showSidePane {
-		availableWidth -= sidePaneWidth
+		availableWidth -= m.sidePaneWidth
 	}
 	if availableWidth < 20 {
 		availableWidth = 20
@@ -480,7 +486,7 @@ func (m *model) resize(width, height int) {
 	m.viewport = viewport.New(width-6, height-v-footerHeight)
 }
 
-func (m model) jumpToHighRisk() (model, tea.Cmd) {
+func (m *model) jumpToHighRisk() (tea.Model, tea.Cmd) {
 	if m.latestHighRiskEntry != nil {
 		items := m.list.Items()
 		for i, it := range items {
@@ -508,124 +514,53 @@ func (m model) jumpToHighRisk() (model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) openDetailView(i item) (tea.Model, tea.Cmd) {
+	m.showingHeatmap = false
+	m.showingStats = false
+	m.showingCheatSheet = false
+	m.showingCommandPalette = false
+	m.showingHelp = false
+
+	m.showingDetail = true
+	m.showingJSON = false
+	m.newAlertInDetail = false
+	m.detailFlagIndex = 0
+	m.detailData = nil
+	m.loadingDetail = true
+	m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex, nil, true))
+	return m, fetchBlockchainData(m.rpcUrls, i.Contract, i.TxHash)
+}
+
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
 
 	if m.showingHelp {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "esc", "q", "?":
-				m.showingHelp = false
-				m.resize(m.windowWidth, m.windowHeight) // Restore viewport for list
-				return m, nil
-			case "left", "h":
-				if m.helpPage > 0 {
-					m.helpPage--
-					m.viewport.SetContent(m.helpPages[m.helpPage])
-					m.viewport.GotoTop()
-				}
-				return m, nil
-			case "right", "l":
-				if m.helpPage < len(m.helpPages)-1 {
-					m.helpPage++
-					m.viewport.SetContent(m.helpPages[m.helpPage])
-					m.viewport.GotoTop()
-				}
-				return m, nil
-			}
-		}
-		m.viewport, cmd = m.viewport.Update(msg)
-		cmds = append(cmds, cmd)
-		return m, tea.Batch(cmds...)
+		return m.updateHelp(msg)
+	}
+
+	if m.showingFilterList {
+		return m.updateFilterList(msg)
 	}
 
 	if m.showingStats {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "esc", "q", "S":
-				m.showingStats = false
-				return m, nil
-			}
-		case tea.WindowSizeMsg:
-			m.resize(msg.Width, msg.Height)
-		}
-		return m, nil
+		return m.updateStats(msg)
 	}
 
 	if m.showingCommandPalette {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "esc":
-				m.showingCommandPalette = false
-				return m, nil
-			case "enter":
-				if len(m.filteredCommands) > 0 {
-					cmdID := m.filteredCommands[m.selectedCommand].ID
-					m.showingCommandPalette = false
-					m.commandInput.Reset()
-					m.filteredCommands = availableCommands // Reset for next time, though overwritten on open
-					return m.executeCommand(cmdID)
-				}
-			case "up", "ctrl+k":
-				if m.selectedCommand > 0 {
-					m.selectedCommand--
-				}
-			case "down", "ctrl+j":
-				if m.selectedCommand < len(m.filteredCommands)-1 {
-					m.selectedCommand++
-				}
-			default:
-				var cmd tea.Cmd
-				m.commandInput, cmd = m.commandInput.Update(msg)
-				val := strings.ToLower(m.commandInput.Value())
-				var newFiltered []CommandItem
-				sourceList := m.getCommandsWithHistory()
-				for _, c := range sourceList {
-					if strings.Contains(strings.ToLower(c.Title), val) || strings.Contains(strings.ToLower(c.Desc), val) {
-						newFiltered = append(newFiltered, c)
-					}
-				}
-				m.filteredCommands = newFiltered
-				m.selectedCommand = 0
-				return m, cmd
-			}
-		}
-		return m, nil
+		return m.updateCommandPalette(msg)
 	}
 
 	if m.showingCheatSheet {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "esc", "q", "K":
-				m.showingCheatSheet = false
-				return m, nil
-			}
-		}
-		return m, nil
+		return m.updateCheatSheet(msg)
 	}
 
 	if m.inSearchMode {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "enter":
-				m.activeSearchQuery = m.searchInput.Value()
-				m.inSearchMode = false
-				m.searchInput.Blur()
-				return m, m.updateListItems()
-			case "esc":
-				m.inSearchMode = false
-				m.searchInput.Blur()
-				return m, nil
-			}
-		}
-		m.searchInput, cmd = m.searchInput.Update(msg)
-		return m, cmd
+		return m.updateSearch(msg)
+	}
+
+	if m.inTimeFilterMode {
+		return m.updateTimeFilter(msg)
 	}
 
 	switch msg := msg.(type) {
@@ -641,7 +576,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					i := *m.pendingReviewItem
 					key := getReviewKey(i.LogEntry)
 					m.reviewedSet[key] = true
-					saveReviewed(m.reviewedSet)
+					_ = m.saveAppState()
 					cmd = m.updateListItems()
 					m.alertMsg = "Event marked as reviewed"
 					cmds = append(cmds, cmd, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
@@ -687,7 +622,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						count++
 					}
 				}
-				saveReviewed(m.reviewedSet)
+				_ = m.saveAppState()
 				m.alertMsg = fmt.Sprintf("Marked %d events as reviewed", count)
 				m.confirmingMarkAll = false
 				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
@@ -709,11 +644,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Ignore other keys while confirming quit.
 			return m, nil
-		}
-
-		// Don't match any of the list's keybindings.
-		if m.list.FilterState() == list.Filtering {
-			break
 		}
 
 		if m.showingDetail {
@@ -806,14 +736,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case msg.String() == "enter" || msg.String() == " ":
 			if i, ok := m.list.SelectedItem().(item); ok {
-				m.showingDetail = true
-				m.showingJSON = false
-				m.newAlertInDetail = false
-				m.detailFlagIndex = 0
-				m.detailData = nil
-				m.loadingDetail = true
-				m.viewport.SetContent(renderDetail(i.LogEntry, m.windowWidth, m.detailFlagIndex, nil, true))
-				return m, fetchBlockchainData(m.rpcUrls, i.Contract, i.TxHash)
+				return m.openDetailView(i)
 			}
 		case key.Matches(msg, appKeys.Pause):
 			m.paused = !m.paused
@@ -908,7 +831,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.watchlistSet[contract] = true
 					m.alertMsg = fmt.Sprintf("Watching %s", contract)
 				}
-				saveWatchlist(m.watchlistSet)
+				_ = m.saveAppState()
 				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
 					return clearAlertMsg{}
 				}))
@@ -923,7 +846,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.watchedDeployersSet[deployer] = true
 					m.alertMsg = fmt.Sprintf("Watching Deployer %s", deployer)
 				}
-				saveWatchedDeployers(m.watchedDeployersSet)
+				_ = m.saveAppState()
 				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
 					return clearAlertMsg{}
 				}))
@@ -938,43 +861,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.pinnedSet[contract] = true
 					m.alertMsg = fmt.Sprintf("Pinned %s", contract)
 				}
-				savePinned(m.pinnedSet)
+				_ = m.saveAppState()
 				sortEntries(m.items, m.sortMode, m.pinnedSet)
 				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
 					return clearAlertMsg{}
 				}))
 			}
 		case key.Matches(msg, appKeys.FilterFlag):
-			// Populate flag list
-			var items []list.Item
-			for f, count := range m.stats.FlagCounts {
-				items = append(items, flagItem{
-					name:  f,
-					count: count,
-					desc:  getFlagDescription(f),
-				})
-			}
-			// Sort by count desc
-			sort.Slice(items, func(i, j int) bool {
-				return items[i].(flagItem).count > items[j].(flagItem).count
-			})
-
-			delegate := list.NewDefaultDelegate()
-			delegate.Styles.SelectedTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Border(lipgloss.NormalBorder(), false, false, false, true).BorderLeftForeground(lipgloss.Color("205")).Padding(0, 0, 0, 1)
-			delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().Foreground(lipgloss.Color("240"))
-
-			l := list.New(items, delegate, 40, 20)
-			l.Title = "Filter by Flag"
-			l.SetShowHelp(false)
-			l.SetFilteringEnabled(true)
-
-			m.flagList = l
-			m.showingFlagList = true
+			m.openFilterList("flag")
 			return m, nil
 		case key.Matches(msg, appKeys.ClearFlagFilter):
 			if m.activeFlagFilter != "" {
 				m.activeFlagFilter = ""
 				m.alertMsg = "Flag filter cleared"
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				}))
+			}
+			return m, nil
+		case key.Matches(msg, appKeys.FilterTokenType):
+			m.openFilterList("tokenType")
+			return m, nil
+		case key.Matches(msg, appKeys.ClearTokenTypeFilter):
+			if m.activeTokenTypeFilter != "" {
+				m.activeTokenTypeFilter = ""
+				m.alertMsg = "Token type filter cleared"
 				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
 					return clearAlertMsg{}
 				}))
@@ -1055,6 +966,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, appKeys.JumpToAlert):
 			return m.jumpToHighRisk()
+		}
+
+		if key.Matches(msg, appKeys.IncreaseSidePane) {
+			if m.showSidePane && m.sidePaneWidth < m.windowWidth/2 {
+				m.sidePaneWidth++
+				m.resize(m.windowWidth, m.windowHeight)
+				_ = m.saveAppState()
+				return m, nil
+			}
+		}
+		if key.Matches(msg, appKeys.DecreaseSidePane) {
+			if m.showSidePane && m.sidePaneWidth > 20 {
+				m.sidePaneWidth--
+				m.resize(m.windowWidth, m.windowHeight)
+				_ = m.saveAppState()
+				return m, nil
+			}
 		}
 
 		if m.showingHeatmap {
@@ -1150,8 +1078,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Update state
 			m.items = append(m.items, msg.entries...)
 			m.fileOffset = msg.offset
-			saveState(m.fileOffset)
-			m.updateStats(msg.entries)
+			_ = m.saveAppState()
+			m.stats.Process(msg.entries)
 
 			// Re-sort items
 			sortEntries(m.items, m.sortMode, m.pinnedSet)
@@ -1190,11 +1118,248 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if !m.showingDetail {
-		m.list, cmd = m.list.Update(msg)
+		m.list, cmd = updateListModel(m.list, msg)
 		cmds = append(cmds, cmd)
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m *model) openFilterList(filterType string) {
+	var items []list.Item
+	var title string
+
+	switch filterType {
+	case "flag":
+		title = "Filter by Flag"
+		for f, count := range m.stats.FlagCounts {
+			items = append(items, flagItem{
+				name:  f,
+				count: count,
+				desc:  getFlagDescription(f),
+			})
+		}
+	case "tokenType":
+		title = "Filter by Token Type"
+		for t, count := range m.stats.TokenTypeCounts {
+			items = append(items, flagItem{
+				name:  t,
+				count: count,
+				desc:  fmt.Sprintf("Filter by %s", t),
+			})
+		}
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].(flagItem).count > items[j].(flagItem).count
+	})
+
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Border(lipgloss.NormalBorder(), false, false, false, true).BorderLeftForeground(lipgloss.Color("205")).Padding(0, 0, 0, 1)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().Foreground(lipgloss.Color("240"))
+
+	l := list.New(items, delegate, 40, 20)
+	l.Title = title
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(true)
+
+	m.filterList = l
+	m.filterListType = filterType
+	m.showingFilterList = true
+}
+
+func (m *model) updateHelp(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc", "q", "?":
+			m.showingHelp = false
+			m.resize(m.windowWidth, m.windowHeight) // Restore viewport for list
+			return m, nil
+		case "left", "h":
+			if m.helpPage > 0 {
+				m.helpPage--
+				m.viewport.SetContent(m.helpPages[m.helpPage])
+				m.viewport.GotoTop()
+			}
+			return m, nil
+		case "right", "l":
+			if m.helpPage < len(m.helpPages)-1 {
+				m.helpPage++
+				m.viewport.SetContent(m.helpPages[m.helpPage])
+				m.viewport.GotoTop()
+			}
+			return m, nil
+		}
+	}
+	m.viewport, cmd = m.viewport.Update(msg)
+	return m, cmd
+}
+
+func (m *model) updateFilterList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.String() == "esc" {
+			m.showingFilterList = false
+			return m, nil
+		}
+		if msg.String() == "enter" {
+			if i, ok := m.filterList.SelectedItem().(flagItem); ok {
+				var alertMsgFmt string
+				switch m.filterListType {
+				case "flag":
+					m.activeFlagFilter = i.name
+					alertMsgFmt = "Filtering by flag: %s"
+				case "tokenType":
+					m.activeTokenTypeFilter = i.name
+					alertMsgFmt = "Filtering by token type: %s"
+				}
+				m.showingFilterList = false
+				m.alertMsg = fmt.Sprintf(alertMsgFmt, i.name)
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return clearAlertMsg{}
+				}))
+			}
+		}
+	case tea.WindowSizeMsg:
+		m.filterList.SetSize(msg.Width-4, msg.Height-4)
+	}
+	m.filterList, cmd = updateListModel(m.filterList, msg)
+	return m, cmd
+}
+
+func (m *model) updateStats(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc", "q", "S":
+			m.showingStats = false
+			return m, nil
+		}
+	case tea.WindowSizeMsg:
+		m.resize(msg.Width, msg.Height)
+	}
+	return m, nil
+}
+
+func (m *model) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			m.showingCommandPalette = false
+			return m, nil
+		case "enter":
+			if len(m.filteredCommands) > 0 {
+				cmdID := m.filteredCommands[m.selectedCommand].ID
+				m.showingCommandPalette = false
+				m.commandInput.Reset()
+				m.filteredCommands = availableCommands // Reset for next time, though overwritten on open
+				return m.executeCommand(cmdID)
+			}
+		case "up", "ctrl+k":
+			if m.selectedCommand > 0 {
+				m.selectedCommand--
+			}
+		case "down", "ctrl+j":
+			if m.selectedCommand < len(m.filteredCommands)-1 {
+				m.selectedCommand++
+			}
+		default:
+			var cmd tea.Cmd
+			m.commandInput, cmd = m.commandInput.Update(msg)
+			val := strings.ToLower(m.commandInput.Value())
+			var newFiltered []CommandItem
+			sourceList := m.getCommandsWithHistory()
+			for _, c := range sourceList {
+				if strings.Contains(strings.ToLower(c.Title), val) || strings.Contains(strings.ToLower(c.Desc), val) {
+					newFiltered = append(newFiltered, c)
+				}
+			}
+			m.filteredCommands = newFiltered
+			m.selectedCommand = 0
+			return m, cmd
+		}
+	}
+	return m, nil
+}
+
+func (m *model) updateCheatSheet(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc", "q", "K":
+			m.showingCheatSheet = false
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m *model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			m.activeSearchQuery = m.searchInput.Value()
+			m.inSearchMode = false
+			m.searchInput.Blur()
+			return m, m.updateListItems()
+		case "esc":
+			m.inSearchMode = false
+			m.searchInput.Blur()
+			return m, nil
+		}
+	}
+	m.searchInput, cmd = m.searchInput.Update(msg)
+	return m, cmd
+}
+
+func (m *model) updateTimeFilter(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			val := m.searchInput.Value()
+			t, err := parseTimeFilter(val)
+			if err != nil {
+				m.alertMsg = "Invalid time format"
+			} else {
+				if m.timeFilterType == "since" {
+					m.filterSince = t
+					m.alertMsg = fmt.Sprintf("Filtering since %s", val)
+				} else {
+					m.filterUntil = t
+					m.alertMsg = fmt.Sprintf("Filtering until %s", val)
+				}
+			}
+			m.inTimeFilterMode = false
+			m.timeFilterType = ""
+			m.searchInput.Blur()
+			m.searchInput.Placeholder = "Contract, TxHash, Deployer..."
+			m.searchInput.SetValue("")
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		case "esc":
+			m.inTimeFilterMode = false
+			m.timeFilterType = ""
+			m.searchInput.Blur()
+			m.searchInput.Placeholder = "Contract, TxHash, Deployer..."
+			m.searchInput.SetValue("")
+			return m, nil
+		}
+	}
+	m.searchInput, cmd = m.searchInput.Update(msg)
+	return m, cmd
+}
+
+func updateListModel(l list.Model, msg tea.Msg) (list.Model, tea.Cmd) {
+	return l.Update(msg)
 }
 
 func (m *model) updateListItems() tea.Cmd {
@@ -1212,6 +1377,15 @@ func (m *model) updateListItems() tea.Cmd {
 				continue
 			}
 		}
+		if m.activeTokenTypeFilter != "" {
+			tType := e.TokenType
+			if tType == "" {
+				tType = "Unknown"
+			}
+			if tType != m.activeTokenTypeFilter {
+				continue
+			}
+		}
 		if !m.filterSince.IsZero() && time.Unix(e.Timestamp, 0).Before(m.filterSince) {
 			continue
 		}
@@ -1223,10 +1397,14 @@ func (m *model) updateListItems() tea.Cmd {
 		}
 		if m.activeSearchQuery != "" {
 			query := strings.ToLower(m.activeSearchQuery)
-			if !strings.Contains(strings.ToLower(e.Contract), query) &&
-				!strings.Contains(strings.ToLower(e.TxHash), query) &&
-				!strings.Contains(strings.ToLower(e.Deployer), query) &&
-				!strings.Contains(strings.ToLower(e.TokenType), query) {
+			searchableString := strings.ToLower(strings.Join([]string{
+				e.Contract,
+				e.TxHash,
+				e.Deployer,
+				e.TokenType,
+				strings.Join(e.Flags, " "),
+			}, " "))
+			if !strings.Contains(searchableString, query) {
 				continue
 			}
 		}
@@ -1243,32 +1421,7 @@ func (m *model) updateListItems() tea.Cmd {
 	return m.list.SetItems(visibleItems)
 }
 
-func (m *model) updateStats(newEntries []LogEntry) {
-	if m.stats.FlagCounts == nil {
-		m.stats.FlagCounts = make(map[string]int)
-	}
-	for _, e := range newEntries {
-		m.contractsSet[e.Contract] = true
-		if e.Deployer != "unknown" {
-			m.deployersSet[e.Deployer] = true
-		}
-		if e.RiskScore >= 50 {
-			m.stats.HighRiskCount++
-		}
-		for _, f := range e.Flags {
-			m.stats.FlagCounts[f]++
-		}
-		m.sumRisk += e.RiskScore
-	}
-	m.stats.TotalEvents += len(newEntries)
-	m.stats.UniqueContracts = len(m.contractsSet)
-	m.stats.UniqueDeployers = len(m.deployersSet)
-	if m.stats.TotalEvents > 0 {
-		m.stats.AvgRisk = float64(m.sumRisk) / float64(m.stats.TotalEvents)
-	}
-}
-
-func sortEntries(entries []LogEntry, mode SortMode, pinnedSet map[string]bool) {
+func sortEntries(entries []stats.LogEntry, mode SortMode, pinnedSet map[string]bool) {
 	sort.Slice(entries, func(i, j int) bool {
 		pinI := pinnedSet[entries[i].Contract]
 		pinJ := pinnedSet[entries[j].Contract]
@@ -1329,22 +1482,30 @@ func (m model) View() string {
 		return m.renderConfirmation("Mark this event as reviewed?")
 	}
 
-	if m.inSearchMode {
+	if m.inSearchMode || m.inTimeFilterMode {
+		title := "Search Logs"
+		if m.inTimeFilterMode {
+			if m.timeFilterType == "since" {
+				title = "Filter Since"
+			} else {
+				title = "Filter Until"
+			}
+		}
 		h, v := appStyle.GetFrameSize()
 		dialog := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("62")).
 			Padding(1, 2).
-			Render(lipgloss.JoinVertical(lipgloss.Center, "Search Logs", "", m.searchInput.View()))
+			Render(lipgloss.JoinVertical(lipgloss.Center, title, "", m.searchInput.View()))
 		return appStyle.Render(lipgloss.Place(m.windowWidth-h, m.windowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
 	}
 
-	if m.showingFlagList {
+	if m.showingFilterList {
 		h, v := appStyle.GetFrameSize()
 		dialog := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("62")).
-			Render(m.flagList.View())
+			Render(m.filterList.View())
 		return appStyle.Render(lipgloss.Place(m.windowWidth-h, m.windowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
 	}
 
@@ -1412,32 +1573,63 @@ func (m model) sideView() string {
 	var sb strings.Builder
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render
+	subTitle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render
 
-	sb.WriteString(title("RECENT FLAGS (Last 10)") + "\n\n")
+	sb.WriteString(title("STATISTICS") + "\n\n")
 
-	// Calculate stats for last 10 items (by block/time)
-	recentItems := make([]LogEntry, len(m.items))
-	copy(recentItems, m.items)
-	sort.Slice(recentItems, func(i, j int) bool {
-		return recentItems[i].Block > recentItems[j].Block
-	})
-	if len(recentItems) > 10 {
-		recentItems = recentItems[:10]
+	// Risk Score Distribution
+	sb.WriteString(subTitle("Risk Distribution") + "\n")
+	buckets := make([]int, 10)
+	maxBucketVal := 0
+
+	barMax := m.sidePaneWidth - 15
+	if barMax < 5 {
+		barMax = 5
 	}
 
-	flagCounts := make(map[string]int)
-	for _, item := range recentItems {
-		for _, f := range item.Flags {
-			flagCounts[f]++
+	for _, e := range m.items {
+		idx := e.RiskScore / 10
+		if idx >= 10 {
+			idx = 9
+		}
+		buckets[idx]++
+		if buckets[idx] > maxBucketVal {
+			maxBucketVal = buckets[idx]
 		}
 	}
+
+	for i := 0; i < 10; i++ {
+		rangeLabel := fmt.Sprintf("%d-%d", i*10, (i*10)+9)
+		if i == 9 {
+			rangeLabel = "90+"
+		}
+		count := buckets[i]
+		barWidth := 0
+		if maxBucketVal > 0 {
+			barWidth = int(float64(count) / float64(maxBucketVal) * float64(barMax))
+		}
+		bar := strings.Repeat("█", barWidth)
+		color := safeRiskStyle
+		if i*10 > 100 {
+			color = criticalRiskStyle
+		} else if i*10 > 75 {
+			color = highRiskStyle
+		} else if i*10 > 50 {
+			color = medRiskStyle
+		} else if i*10 > 10 {
+			color = lowRiskStyle
+		}
+		sb.WriteString(fmt.Sprintf("%-5s %s %d\n", rangeLabel, color.Render(bar), count))
+	}
+
+	sb.WriteString("\n" + subTitle("Top Flags") + "\n")
 
 	type kv struct {
 		Key   string
 		Value int
 	}
 	var ss []kv
-	for k, v := range flagCounts {
+	for k, v := range m.stats.FlagCounts {
 		ss = append(ss, kv{k, v})
 	}
 	sort.Slice(ss, func(i, j int) bool {
@@ -1447,36 +1639,39 @@ func (m model) sideView() string {
 		return ss[i].Key < ss[j].Key
 	})
 
-	// Top 10
-	count := 0
-	maxVal := 0
+	maxFlagVal := 0
 	if len(ss) > 0 {
-		maxVal = ss[0].Value
+		maxFlagVal = ss[0].Value
 	}
 
-	for _, kv := range ss {
-		if count >= 10 {
-			break
-		}
+	keyWidth := m.sidePaneWidth - 16
+	if keyWidth < 5 {
+		keyWidth = 5
+	}
+	barMaxFlag := m.sidePaneWidth - keyWidth - 8
+	if barMaxFlag < 2 {
+		barMaxFlag = 2
+	}
+
+	for i := 0; i < len(ss) && i < 10; i++ {
+		kv := ss[i]
 		barWidth := 0
-		if maxVal > 0 {
-			barWidth = int(float64(kv.Value) / float64(maxVal) * 15)
+		if maxFlagVal > 0 {
+			barWidth = int(float64(kv.Value) / float64(maxFlagVal) * float64(barMaxFlag))
 		}
 		bar := strings.Repeat("█", barWidth)
 
-		// Truncate key to fit 35 chars width
 		keyName := kv.Key
-		if len(keyName) > 28 {
-			keyName = keyName[:25] + "..."
+		if len(keyName) > keyWidth {
+			keyName = keyName[:keyWidth-2] + ".."
 		}
 
-		sb.WriteString(fmt.Sprintf("%s\n%s %d\n", keyName, lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Render(bar), kv.Value))
-		count++
+		sb.WriteString(fmt.Sprintf("%-*s %s %d\n", keyWidth, keyName, lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Render(bar), kv.Value))
 	}
 
 	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Press ? for Help"))
 
-	return sidePaneStyle.Width(sidePaneWidth).Height(m.list.Height()).Render(sb.String())
+	return sidePaneStyle.Width(m.sidePaneWidth).Height(m.list.Height()).Render(sb.String())
 }
 
 func (m model) heatmapView() string {
@@ -1558,14 +1753,19 @@ func (m model) heatmapView() string {
 		for x := 0; x < width; x++ {
 			count := grid[y][x]
 			riskVal := 100 - int((float64(y)/float64(height-1))*100)
-			baseColor := safeRiskStyle
-			if riskVal > 75 {
-				baseColor = highRiskStyle
-			} else if riskVal > 50 {
-				baseColor = medRiskStyle
-			} else if riskVal > 10 {
-				baseColor = lowRiskStyle
+
+			// Gradient calculation: Green -> Yellow -> Red
+			var r, g, b int
+			if riskVal <= 50 {
+				// Green (#00FF00) to Yellow (#FFFF00)
+				r = int(255 * (float64(riskVal) / 50.0))
+				g = 255
+			} else {
+				// Yellow (#FFFF00) to Red (#FF0000)
+				r = 255
+				g = int(255 * (1.0 - (float64(riskVal-50) / 50.0)))
 			}
+			baseColor := lipgloss.NewStyle().Foreground(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", r, g, b)))
 
 			if count > 0 {
 				intensity := float64(count) / float64(maxCount)
@@ -1595,62 +1795,51 @@ func (m model) statsDashboardView() string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render(" Statistics Dashboard ") + "\n\n")
 
-	// Risk Score Distribution
-	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render("Risk Score Distribution") + "\n")
-	buckets := make([]int, 10)
-	maxBucketVal := 0
-	for _, e := range m.items {
-		idx := e.RiskScore / 10
-		if idx >= 10 {
-			idx = 9
-		}
-		buckets[idx]++
-		if buckets[idx] > maxBucketVal {
-			maxBucketVal = buckets[idx]
-		}
+	styleLabel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Width(28)
+	styleValue := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+
+	renderStat := func(label, value string) {
+		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render(label), styleValue.Render(value)))
 	}
 
-	for i := 0; i < 10; i++ {
-		rangeLabel := fmt.Sprintf("%d-%d", i*10, (i*10)+9)
-		if i == 9 {
-			rangeLabel = "90-100"
-		}
-		count := buckets[i]
-		barWidth := 0
-		if maxBucketVal > 0 {
-			barWidth = int(float64(count) / float64(maxBucketVal) * 40)
-		}
-		bar := strings.Repeat("█", barWidth)
-		color := safeRiskStyle
-		if i*10 > 100 {
-			color = criticalRiskStyle
-		} else if i*10 > 75 {
-			color = highRiskStyle
-		} else if i*10 > 50 {
-			color = medRiskStyle
-		} else if i*10 > 10 {
-			color = lowRiskStyle
-		}
-		sb.WriteString(fmt.Sprintf("%-6s %s %d\n", rangeLabel, color.Render(bar), count))
+	uptime := time.Since(m.programStart)
+	if uptime < time.Second {
+		uptime = time.Second
 	}
 
-	sb.WriteString("\n" + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render("Top Flags") + "\n")
-	// Reuse flag stats logic
-	type kv struct {
-		Key   string
-		Value int
-	}
-	var ss []kv
-	for k, v := range m.stats.FlagCounts {
-		ss = append(ss, kv{k, v})
-	}
-	sort.Slice(ss, func(i, j int) bool {
-		return ss[i].Value > ss[j].Value
-	})
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("--- Program Statistics ---") + "\n")
+	renderStat("Total Events Processed", fmt.Sprintf("%d", m.stats.TotalEvents))
+	renderStat("Events Per Second", fmt.Sprintf("%.2f", float64(m.stats.TotalEvents)/uptime.Seconds()))
 
-	for i := 0; i < len(ss) && i < 10; i++ {
-		sb.WriteString(fmt.Sprintf("%-30s %d\n", ss[i].Key, ss[i].Value))
+	dataSize := float64(m.fileOffset)
+	unit := "B"
+	if dataSize > 1024*1024 {
+		dataSize /= 1024 * 1024
+		unit = "MB"
+	} else if dataSize > 1024 {
+		dataSize /= 1024
+		unit = "KB"
 	}
+	renderStat("Data Processed", fmt.Sprintf("%.2f %s", dataSize, unit))
+
+	latency := "N/A"
+	if m.rpcLatency > 0 {
+		latency = m.rpcLatency.Round(time.Millisecond).String()
+	}
+	renderStat("RPC Latency", latency)
+
+	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("--- Data Statistics ---") + "\n")
+	renderStat("Unique Contracts", fmt.Sprintf("%d", m.stats.UniqueContracts))
+	renderStat("Unique Deployers", fmt.Sprintf("%d", m.stats.UniqueDeployers))
+	renderStat("Unique Labels/Triggers", fmt.Sprintf("%d", len(m.stats.FlagCounts)))
+
+	mtbe := "N/A"
+	if m.stats.TotalEvents > 1 && m.stats.LastEventTime > m.stats.FirstEventTime {
+		diff := float64(m.stats.LastEventTime - m.stats.FirstEventTime)
+		avg := diff / float64(m.stats.TotalEvents-1)
+		mtbe = fmt.Sprintf("%.2fs", avg)
+	}
+	renderStat("Mean Time Between Events", mtbe)
 
 	return appStyle.Render(sb.String())
 }
@@ -1672,6 +1861,9 @@ func (m model) renderCheatSheet() string {
 		{"!", "Jump to alert"}, {"z", "Compact mode"},
 		{"V", "Toggle footer"}, {"?", "Toggle help"},
 		{"K", "Toggle cheat sheet"},
+		{"ctrl+p", "Command palette"},
+		{"{/}", "Resize side pane"},
+		{"e", "Filter token type"}, {"E", "Clear token filter"},
 	}
 
 	mid := (len(shortcuts) + 1) / 2
@@ -1772,7 +1964,7 @@ func (m *model) generateHelpPages(width int) {
 	// --- Page 0: About & Overview ---
 	bold := lipgloss.NewStyle().Bold(true)
 	aboutSection := lipgloss.JoinVertical(lipgloss.Center,
-		titleStyle.Render(" ETH Watchtower "),
+		titleStyle.Render(fmt.Sprintf(" ETH Watchtower v%s ", version)),
 		"",
 		"A real-time TUI for monitoring Ethereum contract deployments,",
 		"analyzing risks, and detecting suspicious patterns.",
@@ -1780,7 +1972,7 @@ func (m *model) generateHelpPages(width int) {
 		bold.Render("Support the Project"),
 		"",
 		bold.Render("(e) ETH/ERC20:")+" 0x9b4FfDADD87022C8B7266e28ad851496115ffB48",
-		bold.Render("(s) SOL:")+" 68L4XzSbRUaNE4UnxEd8DweSWEoiMQi6uygzERZLbXDw",
+		bold.Render("(s) SOL:")+" HB2o6q6vsW5796U5y7NxNqA7vYZW1vuQjpAHDo7FAMG8",
 		bold.Render("(b) BTC:")+" bc1qkmzc6d49fl0edyeynezwlrfqv486nmk6p5pmta",
 	)
 
@@ -1799,8 +1991,8 @@ func (m *model) generateHelpPages(width int) {
 	shortcuts := []struct{ key, desc string }{
 		{"p", "Pause/Resume"}, {"c", "Clear alerts"},
 		{"/", "Search/Filter"}, {"y", "Copy contract"},
-		{"s", "Sort events"}, {"o", "Open browser"},
-		{"x", "Mark reviewed"}, {"X", "Mark all reviewed"},
+		{"s", "Sort events"}, {"o", "Open browser"}, {"x", "Mark reviewed"},
+		{"X", "Mark all reviewed"},
 		{"H", "Toggle reviewed"}, {"w", "Watch address"},
 		{"P", "Pin contract"}, {"W", "Watch deployer"},
 		{"d", "Copy deployer"}, {"f", "Filter by flag"},
@@ -1808,8 +2000,10 @@ func (m *model) generateHelpPages(width int) {
 		{"S", "Stats dashboard"}, {"M", "Heatmap view"},
 		{"t", "Heatmap follow"}, {"+/-", "Zoom heatmap"},
 		{"0", "Reset zoom"}, {"h/l", "Scroll heatmap"},
-		{"[/]", "Min risk score"}, {"</>", "Max risk score"},
-		{"!", "Jump to alert"}, {"z", "Compact mode"},
+		{"[/]", "Min risk score"}, {"</>", "Max risk score"}, {"e", "Filter token type"},
+		{"!", "Jump to alert"}, {"z", "Compact mode"}, {"{/}", "Resize side pane"},
+		{"E", "Clear token filter"},
+		{"ctrl+p", "Command palette"},
 		{"V", "Toggle footer"}, {"?", "Toggle help"},
 		{"K", "Toggle cheat sheet"},
 	}
@@ -1838,12 +2032,16 @@ func (m *model) generateHelpPages(width int) {
 		controlsView,
 	)
 
+	versionInfo := fmt.Sprintf("Version: %s | Commit: %s | Built: %s", version, commit, date)
+
 	page0 := lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(aboutSection),
 		"\n",
 		lipgloss.NewStyle().Width(width).Render(riskContent),
 		"\n",
 		lipgloss.NewStyle().Width(width).Render(controlsContent),
+		"\n\n",
+		lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Faint(true).Render(versionInfo),
 	)
 	m.helpPages = append(m.helpPages, page0)
 
@@ -1907,8 +2105,20 @@ func (m model) statsView() string {
 		statsView += fmt.Sprintf(" | FILTER: %s", m.activeFlagFilter)
 	}
 
+	if m.activeTokenTypeFilter != "" {
+		statsView += fmt.Sprintf(" | TYPE: %s", m.activeTokenTypeFilter)
+	}
+
 	if m.activeSearchQuery != "" {
 		statsView += fmt.Sprintf(" | SEARCH: %s", m.activeSearchQuery)
+	}
+
+	if !m.filterSince.IsZero() {
+		statsView += fmt.Sprintf(" | >%s", m.filterSince.Format("15:04"))
+	}
+
+	if !m.filterUntil.IsZero() {
+		statsView += fmt.Sprintf(" | <%s", m.filterUntil.Format("15:04"))
 	}
 
 	if m.paused {
@@ -1948,11 +2158,10 @@ func (m model) statsView() string {
 }
 
 func (m model) renderHelp() string {
-	keys := []key.Binding{appKeys.Pause, appKeys.Sort, appKeys.Open, appKeys.ToggleLegend, appKeys.Heatmap, appKeys.StatsView, appKeys.CheatSheet, appKeys.Help, appKeys.CommandPalette}
-	return m.help.ShortHelpView(keys)
+	return m.help.ShortHelpView(footerHelpKeys)
 }
 
-func renderDetail(e LogEntry, width int, selectedFlagIdx int, data *BlockchainData, loading bool) string {
+func renderDetail(e stats.LogEntry, width int, selectedFlagIdx int, data *BlockchainData, loading bool) string {
 	halfWidth := width/2 - 4
 	if halfWidth < 40 {
 		halfWidth = width - 4
@@ -2127,7 +2336,7 @@ func fetchBlockchainData(rpcURLs []string, contract, txHash string) tea.Cmd {
 				return "", err
 			}
 			if res.Error != nil {
-				return "", fmt.Errorf(res.Error.Message)
+				return "", fmt.Errorf("%s", res.Error.Message)
 			}
 			var result string
 			if err := json.Unmarshal(res.Result, &result); err != nil {
@@ -2250,7 +2459,30 @@ func decodeInputData(input string) string {
 	return ""
 }
 
-func renderJSON(e LogEntry, width int) string {
+func parseLogEntries(reader *bufio.Reader) ([]stats.LogEntry, int64, error) {
+	var entries []stats.LogEntry
+	bytesRead := int64(0)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			bytesRead += int64(len(line))
+			var entry stats.LogEntry
+			if json.Unmarshal(line, &entry) == nil {
+				sortFlags(entry.Flags)
+				entries = append(entries, entry)
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return entries, bytesRead, err
+		}
+	}
+	return entries, bytesRead, nil
+}
+
+func renderJSON(e stats.LogEntry, width int) string {
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return "Error marshaling JSON"
@@ -2258,7 +2490,7 @@ func renderJSON(e LogEntry, width int) string {
 	return lipgloss.NewStyle().Width(width - 4).Render(string(b))
 }
 
-func readLogEntries(path string, offset int64) ([]LogEntry, int64, error) {
+func readLogEntries(path string, offset int64) ([]stats.LogEntry, int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, offset, err
@@ -2284,32 +2516,12 @@ func readLogEntries(path string, offset int64) ([]LogEntry, int64, error) {
 		return nil, offset, err
 	}
 
-	var entries []LogEntry
 	reader := bufio.NewReader(file)
-	bytesRead := int64(0)
-
-	for {
-		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			bytesRead += int64(len(line))
-			var entry LogEntry
-			if json.Unmarshal(line, &entry) == nil {
-				sortFlags(entry.Flags)
-				entries = append(entries, entry)
-			}
-		}
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return entries, offset + bytesRead, err
-		}
-	}
-
-	return entries, offset + bytesRead, nil
+	entries, bytesRead, err := parseLogEntries(reader)
+	return entries, offset + bytesRead, err
 }
 
-func readLogHistory(path string, limit int64) ([]LogEntry, error) {
+func readLogHistory(path string, limit int64) ([]stats.LogEntry, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -2325,20 +2537,7 @@ func readLogHistory(path string, limit int64) ([]LogEntry, error) {
 	}
 
 	reader := bufio.NewReader(io.LimitReader(file, limit))
-	var entries []LogEntry
-	for {
-		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			var entry LogEntry
-			if json.Unmarshal(line, &entry) == nil {
-				sortFlags(entry.Flags)
-				entries = append(entries, entry)
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
+	entries, _, err := parseLogEntries(reader)
 	return entries, nil
 }
 
@@ -2375,151 +2574,78 @@ func waitForFileChange(path string, offset int64) tea.Cmd {
 	}
 }
 
-type AppState struct {
-	Offset int64 `json:"offset"`
+type PersistentState struct {
+	FileOffset          int64
+	SidePaneWidth       int
+	ReviewedSet         map[string]bool
+	WatchlistSet        map[string]bool
+	PinnedSet           map[string]bool
+	WatchedDeployersSet map[string]bool
+	CommandHistory      []string
 }
 
-func saveState(offset int64) error {
-	state := AppState{Offset: offset}
-	data, err := json.Marshal(state)
+func (m *model) saveAppState() error {
+	// Rotate backups before saving the new state.
+	// This provides a simple safety net if the state file gets corrupted.
+
+	// 1. Remove the oldest backup, if it exists.
+	oldestBackup := fmt.Sprintf("%s.%d", stateFilePath, maxBackups)
+	_ = os.Remove(oldestBackup)
+
+	// 2. Shift existing backups up by one. (e.g., .1 -> .2, .2 -> .3)
+	for i := maxBackups - 1; i >= 1; i-- {
+		currentBackup := fmt.Sprintf("%s.%d", stateFilePath, i)
+		nextBackup := fmt.Sprintf("%s.%d", stateFilePath, i+1)
+		if _, err := os.Stat(currentBackup); err == nil {
+			_ = os.Rename(currentBackup, nextBackup)
+		}
+	}
+
+	// 3. Backup the current state file to the first backup slot.
+	if _, err := os.Stat(stateFilePath); err == nil {
+		_ = os.Rename(stateFilePath, fmt.Sprintf("%s.1", stateFilePath))
+	}
+
+	state := PersistentState{
+		FileOffset:          m.fileOffset,
+		SidePaneWidth:       m.sidePaneWidth,
+		ReviewedSet:         m.reviewedSet,
+		WatchlistSet:        m.watchlistSet,
+		PinnedSet:           m.pinnedSet,
+		WatchedDeployersSet: m.watchedDeployersSet,
+		CommandHistory:      m.commandHistory,
+	}
+
+	file, err := os.Create(stateFilePath)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(stateFilePath, data, 0644)
+	defer file.Close()
+
+	encoder := gob.NewEncoder(file)
+	return encoder.Encode(state)
 }
 
-func loadState() (int64, error) {
-	data, err := os.ReadFile(stateFilePath)
+func loadPersistentState() (PersistentState, error) {
+	file, err := os.Open(stateFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return PersistentState{}, nil
 		}
-		return 0, err
+		return PersistentState{}, err
 	}
-	var state AppState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return 0, err
+	defer file.Close()
+
+	var state PersistentState
+	decoder := gob.NewDecoder(file)
+	if err := decoder.Decode(&state); err != nil {
+		return PersistentState{}, err
 	}
-	return state.Offset, nil
+	return state, nil
 }
 
-func getReviewKey(e LogEntry) string {
+func getReviewKey(e stats.LogEntry) string {
 	return fmt.Sprintf("%s_%s_%d", e.TxHash, e.Contract, e.Block)
-}
-
-func loadReviewed() (map[string]bool, error) {
-	data, err := os.ReadFile(reviewedFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return make(map[string]bool), nil
-		}
-		return nil, err
-	}
-	var reviewed map[string]bool
-	if err := json.Unmarshal(data, &reviewed); err != nil {
-		return make(map[string]bool), nil
-	}
-	return reviewed, nil
-}
-
-func saveReviewed(reviewed map[string]bool) error {
-	data, err := json.Marshal(reviewed)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(reviewedFilePath, data, 0644)
-}
-
-func loadWatchlist() (map[string]bool, error) {
-	data, err := os.ReadFile(watchlistFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return make(map[string]bool), nil
-		}
-		return nil, err
-	}
-	var watchlist map[string]bool
-	if err := json.Unmarshal(data, &watchlist); err != nil {
-		return make(map[string]bool), nil
-	}
-	return watchlist, nil
-}
-
-func saveWatchlist(watchlist map[string]bool) error {
-	data, err := json.Marshal(watchlist)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(watchlistFilePath, data, 0644)
-}
-
-func loadPinned() (map[string]bool, error) {
-	data, err := os.ReadFile(pinnedFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return make(map[string]bool), nil
-		}
-		return nil, err
-	}
-	var pinned map[string]bool
-	if err := json.Unmarshal(data, &pinned); err != nil {
-		return make(map[string]bool), nil
-	}
-	return pinned, nil
-}
-
-func savePinned(pinned map[string]bool) error {
-	data, err := json.Marshal(pinned)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(pinnedFilePath, data, 0644)
-}
-
-func loadWatchedDeployers() (map[string]bool, error) {
-	data, err := os.ReadFile(watchedDeployersFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return make(map[string]bool), nil
-		}
-		return nil, err
-	}
-	var watched map[string]bool
-	if err := json.Unmarshal(data, &watched); err != nil {
-		return make(map[string]bool), nil
-	}
-	return watched, nil
-}
-
-func saveWatchedDeployers(watched map[string]bool) error {
-	data, err := json.Marshal(watched)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(watchedDeployersFilePath, data, 0644)
-}
-
-func loadCommandHistory() ([]string, error) {
-	data, err := os.ReadFile(commandHistoryFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{}, nil
-		}
-		return nil, err
-	}
-	var history []string
-	if err := json.Unmarshal(data, &history); err != nil {
-		return []string{}, nil
-	}
-	return history, nil
-}
-
-func saveCommandHistory(history []string) error {
-	data, err := json.Marshal(history)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(commandHistoryFilePath, data, 0644)
 }
 
 var flagDescriptions = map[string]string{
@@ -2783,7 +2909,31 @@ var availableCommands = []CommandItem{
 	{"Reset Heatmap Zoom", "Reset heatmap zoom and position", "reset_heatmap"},
 	{"Heatmap Follow Mode", "Toggle heatmap follow mode", "toggle_heatmap_follow"},
 	{"Clear Flag Filter", "Remove active flag filter", "clear_flag_filter"},
+	{"Filter by Flag", "Filter events by a specific flag", "filter_flag"},
 	{"Toggle Reviewed", "Show/hide reviewed items", "toggle_reviewed"},
+	{"Filter Token Type", "Filter by ERC standard", "filter_token_type"},
+	{"Clear Token Type Filter", "Clear token type filter", "clear_token_type_filter"},
+	{"Filter Time Since", "Filter logs since time/duration", "filter_since"},
+	{"Filter Time Until", "Filter logs until time/duration", "filter_until"},
+	{"Clear Time Filter", "Clear time range filters", "clear_time_filter"},
+	{"Copy Contract Address", "Copy the selected contract address", "copy_address"},
+	{"Copy Deployer Address", "Copy the selected deployer address", "copy_deployer"},
+	{"Sort Events", "Cycle through sort modes", "sort_events"},
+	{"Open in Browser", "Open selected transaction in browser", "open_browser"},
+	{"Mark Reviewed", "Mark selected item as reviewed", "mark_reviewed"},
+	{"Watch Contract", "Toggle watch status for contract", "watch_contract"},
+	{"Watch Deployer", "Toggle watch status for deployer", "watch_deployer"},
+	{"Pin Contract", "Pin/Unpin selected contract", "pin_contract"},
+	{"Search/Filter", "Focus search bar", "search_filter"},
+	{"Jump to Alert", "Jump to latest high risk alert", "jump_to_alert"},
+	{"Increase Min Risk", "Increase minimum risk score filter", "inc_min_risk"},
+	{"Decrease Min Risk", "Decrease minimum risk score filter", "dec_min_risk"},
+	{"Increase Max Risk", "Increase maximum risk score filter", "inc_max_risk"},
+	{"Decrease Max Risk", "Decrease maximum risk score filter", "dec_max_risk"},
+	{"Zoom In Heatmap", "Zoom in on the heatmap", "zoom_in"},
+	{"Zoom Out Heatmap", "Zoom out on the heatmap", "zoom_out"},
+	{"Increase Side Pane", "Increase side pane width", "inc_side_pane"},
+	{"Decrease Side Pane", "Decrease side pane width", "dec_side_pane"},
 	{"Help", "Show help screen", "help"},
 }
 
@@ -2817,19 +2967,19 @@ func (m model) getCommandsWithHistory() []CommandItem {
 	return result
 }
 
-func (m model) executeCommand(id string) (model, tea.Cmd) {
-	// Update history
-	newHist := []string{id}
+func (m *model) executeCommand(id string) (tea.Model, tea.Cmd) {
+	// Update history: remove id if it exists, then prepend it
+	var filteredHist []string
 	for _, h := range m.commandHistory {
 		if h != id {
-			newHist = append(newHist, h)
+			filteredHist = append(filteredHist, h)
 		}
 	}
-	if len(newHist) > 20 {
-		newHist = newHist[:20]
+	m.commandHistory = append([]string{id}, filteredHist...)
+	if len(m.commandHistory) > 20 {
+		m.commandHistory = m.commandHistory[:20]
 	}
-	m.commandHistory = newHist
-	saveCommandHistory(m.commandHistory)
+	_ = m.saveAppState()
 
 	var cmd tea.Cmd
 	switch id {
@@ -2898,9 +3048,181 @@ func (m model) executeCommand(id string) (model, tea.Cmd) {
 				return clearAlertMsg{}
 			}))
 		}
+	case "filter_flag":
+		m.openFilterList("flag")
 	case "toggle_reviewed":
 		m.showReviewed = !m.showReviewed
 		return m, m.updateListItems()
+	case "filter_token_type":
+		m.openFilterList("tokenType")
+	case "clear_token_type_filter":
+		if m.activeTokenTypeFilter != "" {
+			m.activeTokenTypeFilter = ""
+			m.alertMsg = "Token type filter cleared"
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		}
+	case "filter_since":
+		m.inTimeFilterMode = true
+		m.timeFilterType = "since"
+		m.searchInput.Placeholder = "Duration (e.g. 1h) or RFC3339..."
+		m.searchInput.SetValue("")
+		m.searchInput.Focus()
+	case "filter_until":
+		m.inTimeFilterMode = true
+		m.timeFilterType = "until"
+		m.searchInput.Placeholder = "Duration (e.g. 1h) or RFC3339..."
+		m.searchInput.SetValue("")
+		m.searchInput.Focus()
+	case "clear_time_filter":
+		m.filterSince = time.Time{}
+		m.filterUntil = time.Time{}
+		m.alertMsg = "Time filters cleared"
+		return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+			return clearAlertMsg{}
+		}))
+	case "copy_address":
+		if i, ok := m.list.SelectedItem().(item); ok {
+			_ = clipboard.WriteAll(i.Contract)
+			m.alertMsg = fmt.Sprintf("Copied %s", i.Contract)
+			return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			})
+		}
+	case "copy_deployer":
+		if i, ok := m.list.SelectedItem().(item); ok {
+			_ = clipboard.WriteAll(i.Deployer)
+			m.alertMsg = fmt.Sprintf("Copied Deployer %s", i.Deployer)
+			return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			})
+		}
+	case "sort_events":
+		m.sortMode = (m.sortMode + 1) % 4
+		sortEntries(m.items, m.sortMode, m.pinnedSet)
+		return m, m.updateListItems()
+	case "open_browser":
+		if i, ok := m.list.SelectedItem().(item); ok {
+			_ = openBrowser("https://etherscan.io/tx/" + i.TxHash)
+			m.alertMsg = "Opening Etherscan..."
+			return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			})
+		}
+	case "mark_reviewed":
+		if i, ok := m.list.SelectedItem().(item); ok {
+			m.confirmingReview = true
+			m.pendingReviewItem = &i
+		}
+	case "watch_contract":
+		if i, ok := m.list.SelectedItem().(item); ok {
+			contract := i.Contract
+			if m.watchlistSet[contract] {
+				delete(m.watchlistSet, contract)
+				m.alertMsg = fmt.Sprintf("Unwatched %s", contract)
+			} else {
+				m.watchlistSet[contract] = true
+				m.alertMsg = fmt.Sprintf("Watching %s", contract)
+			}
+			_ = m.saveAppState()
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		}
+	case "watch_deployer":
+		if i, ok := m.list.SelectedItem().(item); ok {
+			deployer := i.Deployer
+			if m.watchedDeployersSet[deployer] {
+				delete(m.watchedDeployersSet, deployer)
+				m.alertMsg = fmt.Sprintf("Unwatched Deployer %s", deployer)
+			} else {
+				m.watchedDeployersSet[deployer] = true
+				m.alertMsg = fmt.Sprintf("Watching Deployer %s", deployer)
+			}
+			_ = m.saveAppState()
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		}
+	case "pin_contract":
+		if i, ok := m.list.SelectedItem().(item); ok {
+			contract := i.Contract
+			if m.pinnedSet[contract] {
+				delete(m.pinnedSet, contract)
+				m.alertMsg = fmt.Sprintf("Unpinned %s", contract)
+			} else {
+				m.pinnedSet[contract] = true
+				m.alertMsg = fmt.Sprintf("Pinned %s", contract)
+			}
+			_ = m.saveAppState()
+			sortEntries(m.items, m.sortMode, m.pinnedSet)
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		}
+	case "search_filter":
+		m.inSearchMode = true
+		m.searchInput.Focus()
+	case "jump_to_alert":
+		return m.jumpToHighRisk()
+	case "inc_min_risk":
+		if m.minRiskScore < m.maxRiskScore {
+			m.minRiskScore++
+			m.alertMsg = fmt.Sprintf("Risk Range: %d-%d", m.minRiskScore, m.maxRiskScore)
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		}
+	case "dec_min_risk":
+		if m.minRiskScore > 0 {
+			m.minRiskScore--
+			m.alertMsg = fmt.Sprintf("Risk Range: %d-%d", m.minRiskScore, m.maxRiskScore)
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		}
+	case "inc_max_risk":
+		if m.maxRiskScore < 100 {
+			m.maxRiskScore++
+			m.alertMsg = fmt.Sprintf("Risk Range: %d-%d", m.minRiskScore, m.maxRiskScore)
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		}
+	case "dec_max_risk":
+		if m.maxRiskScore > m.minRiskScore {
+			m.maxRiskScore--
+			m.alertMsg = fmt.Sprintf("Risk Range: %d-%d", m.minRiskScore, m.maxRiskScore)
+			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return clearAlertMsg{}
+			}))
+		}
+	case "zoom_in":
+		m.heatmapZoom *= 1.5
+		halfSpan := 0.5 / m.heatmapZoom
+		if m.heatmapCenter < halfSpan {
+			m.heatmapCenter = halfSpan
+		} else if m.heatmapCenter > 1.0-halfSpan {
+			m.heatmapCenter = 1.0 - halfSpan
+		}
+	case "zoom_out":
+		m.heatmapZoom /= 1.5
+		if m.heatmapZoom < 1.0 {
+			m.heatmapZoom = 1.0
+		}
+	case "inc_side_pane":
+		if m.showSidePane && m.sidePaneWidth < m.windowWidth/2 {
+			m.sidePaneWidth++
+			m.resize(m.windowWidth, m.windowHeight)
+			_ = m.saveAppState()
+		}
+	case "dec_side_pane":
+		if m.showSidePane && m.sidePaneWidth > 20 {
+			m.sidePaneWidth--
+			m.resize(m.windowWidth, m.windowHeight)
+			_ = m.saveAppState()
+		}
 	case "help":
 		if m.helpPages == nil {
 			m.generateHelpPages(m.windowWidth - 10)
@@ -2916,32 +3238,40 @@ func (m model) executeCommand(id string) (model, tea.Cmd) {
 }
 
 type Config struct {
-	LogFilePath              string   `json:"logFilePath"`
-	StateFilePath            string   `json:"stateFilePath"`
-	ReviewedFilePath         string   `json:"reviewedFilePath"`
-	WatchlistFilePath        string   `json:"watchlistFilePath"`
-	PinnedFilePath           string   `json:"pinnedFilePath"`
-	WatchedDeployersFilePath string   `json:"watchedDeployersFilePath"`
-	CommandHistoryFilePath   string   `json:"commandHistoryFilePath"`
-	ResetState               bool     `json:"resetState"`
-	MinRiskScore             int      `json:"minRiskScore"`
-	MaxRiskScore             int      `json:"maxRiskScore"`
-	RpcUrls                  []string `json:"rpcUrls"`
+	LogFilePath          string     `json:"logFilePath"`
+	StateFilePath        string     `json:"stateFilePath"`
+	ResetState           bool       `json:"resetState"`
+	MinRiskScore         int        `json:"minRiskScore"`
+	MaxRiskScore         int        `json:"maxRiskScore"`
+	RpcUrls              []string   `json:"rpcUrls"`
+	DefaultSidePaneWidth int        `json:"defaultSidePaneWidth"`
+	RiskColors           RiskColors `json:"riskColors"`
+}
+
+type RiskColors struct {
+	Critical string `json:"critical"`
+	High     string `json:"high"`
+	Medium   string `json:"medium"`
+	Low      string `json:"low"`
+	Safe     string `json:"safe"`
 }
 
 func loadConfig() Config {
 	c := Config{
-		LogFilePath:              logFilePath,
-		StateFilePath:            stateFilePath,
-		ReviewedFilePath:         reviewedFilePath,
-		WatchlistFilePath:        watchlistFilePath,
-		PinnedFilePath:           pinnedFilePath,
-		WatchedDeployersFilePath: watchedDeployersFilePath,
-		CommandHistoryFilePath:   commandHistoryFilePath,
-		ResetState:               false,
-		MinRiskScore:             10,
-		MaxRiskScore:             300,
-		RpcUrls:                  []string{"https://eth.llamarpc.com"},
+		LogFilePath:          logFilePath,
+		StateFilePath:        stateFilePath,
+		ResetState:           false,
+		MinRiskScore:         10,
+		MaxRiskScore:         300,
+		RpcUrls:              []string{"https://eth.llamarpc.com"},
+		DefaultSidePaneWidth: defaultSidePaneWidth,
+		RiskColors: RiskColors{
+			Critical: "#FF0000",
+			High:     "#FFA500",
+			Medium:   "#FFFF00",
+			Low:      "#FFFACD",
+			Safe:     "#00FF00",
+		},
 	}
 
 	if data, err := os.ReadFile("config.json"); err == nil {
@@ -2952,17 +3282,20 @@ func loadConfig() Config {
 
 func createDefaultConfig() {
 	c := Config{
-		LogFilePath:              "eth-watchtower.jsonl",
-		StateFilePath:            "eth-watchtower.state",
-		ReviewedFilePath:         "eth-watchtower.reviewed",
-		WatchlistFilePath:        "eth-watchtower.watchlist",
-		PinnedFilePath:           "eth-watchtower.pinned",
-		WatchedDeployersFilePath: "eth-watchtower.watched_deployers",
-		CommandHistoryFilePath:   "eth-watchtower.command_history",
-		ResetState:               false,
-		MinRiskScore:             10,
-		MaxRiskScore:             300,
-		RpcUrls:                  []string{"https://eth.llamarpc.com"},
+		LogFilePath:          "eth-watchtower.jsonl",
+		StateFilePath:        "eth-watchtower.bin",
+		ResetState:           false,
+		MinRiskScore:         10,
+		MaxRiskScore:         300,
+		RpcUrls:              []string{"https://eth.llamarpc.com"},
+		DefaultSidePaneWidth: defaultSidePaneWidth,
+		RiskColors: RiskColors{
+			Critical: "#FF0000",
+			High:     "#FFA500",
+			Medium:   "#FFFF00",
+			Low:      "#FFFACD",
+			Safe:     "#00FF00",
+		},
 	}
 
 	if _, err := os.Stat("config.json"); err == nil {
@@ -3002,20 +3335,21 @@ func main() {
 	if cfg.StateFilePath != "" {
 		stateFilePath = cfg.StateFilePath
 	}
-	if cfg.ReviewedFilePath != "" {
-		reviewedFilePath = cfg.ReviewedFilePath
+
+	if cfg.RiskColors.Critical != "" {
+		criticalRiskStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(cfg.RiskColors.Critical))
 	}
-	if cfg.WatchlistFilePath != "" {
-		watchlistFilePath = cfg.WatchlistFilePath
+	if cfg.RiskColors.High != "" {
+		highRiskStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(cfg.RiskColors.High))
 	}
-	if cfg.PinnedFilePath != "" {
-		pinnedFilePath = cfg.PinnedFilePath
+	if cfg.RiskColors.Medium != "" {
+		medRiskStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(cfg.RiskColors.Medium))
 	}
-	if cfg.WatchedDeployersFilePath != "" {
-		watchedDeployersFilePath = cfg.WatchedDeployersFilePath
+	if cfg.RiskColors.Low != "" {
+		lowRiskStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(cfg.RiskColors.Low))
 	}
-	if cfg.CommandHistoryFilePath != "" {
-		commandHistoryFilePath = cfg.CommandHistoryFilePath
+	if cfg.RiskColors.Safe != "" {
+		safeRiskStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(cfg.RiskColors.Safe))
 	}
 
 	resetState := flag.Bool("reset-state", cfg.ResetState, "Reset state and read from beginning (ignore saved history position)")
@@ -3024,31 +3358,45 @@ func main() {
 	untilFlag := flag.String("until", "", "Filter logs until this time (duration like 1h or RFC3339 timestamp)")
 	minRiskFlag := flag.Int("min-risk", cfg.MinRiskScore, "Minimum risk score to display")
 	maxRiskFlag := flag.Int("max-risk", cfg.MaxRiskScore, "Maximum risk score to display")
+	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
 	if *initConfig {
-		createDefaultConfig()
+		if err := config.CreateDefault(); err != nil {
+			fmt.Printf("Error creating default config: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
+	if *versionFlag {
+		fmt.Printf("eth-watchtower-tui v%s\n", version)
+		fmt.Printf("commit: %s\n", commit)
+		fmt.Printf("built at: %s\n", date)
+		return
+	}
+
+	logFilePath := cfg.LogFilePath
 	if flag.NArg() > 0 {
 		logFilePath = flag.Arg(0)
 	}
 
-	filterSince, err := parseTimeFilter(*sinceFlag)
+	filterSince, err := util.ParseTimeFilter(*sinceFlag)
 	if err != nil {
 		fmt.Printf("Error parsing since time: %v\n", err)
 		os.Exit(1)
 	}
-	filterUntil, err := parseTimeFilter(*untilFlag)
+	filterUntil, err := util.ParseTimeFilter(*untilFlag)
 	if err != nil {
 		fmt.Printf("Error parsing until time: %v\n", err)
 		os.Exit(1)
 	}
 
+	var savedState data.PersistentState
 	var savedOffset int64
 	if !*resetState {
-		savedOffset, _ = loadState()
+		savedState, _ = data.LoadState(cfg.StateFilePath)
+		savedOffset = savedState.FileOffset
 	}
 
 	// Handle file truncation or reset
@@ -3059,20 +3407,19 @@ func main() {
 	}
 
 	// Read history (0 to savedOffset) - No alerts for these
-	var history []LogEntry
+	var history []stats.LogEntry
 	if savedOffset > 0 {
 		var err error
-		history, err = readLogHistory(logFilePath, savedOffset)
+		history, err = data.ReadLogHistory(logFilePath, savedOffset)
 		if err != nil {
 			fmt.Printf("Error reading log history: %v\n", err)
-			// Fallback to reading everything as new if history fails
 			savedOffset = 0
 			history = nil
 		}
 	}
 
 	// Read recent (savedOffset to EOF) - These are "new" since last run
-	recent, offset, err := readLogEntries(logFilePath, savedOffset)
+	recent, offset, err := data.ReadLogEntries(logFilePath, savedOffset)
 	if err != nil {
 		fmt.Printf("Error reading log file: %v\n", err)
 		os.Exit(1)
@@ -3080,36 +3427,31 @@ func main() {
 
 	entries := append(history, recent...)
 
-	// Keep only the last 100 entries
+	// Limit initial load to last 100 entries if no time filter is set
 	if len(entries) > 100 && filterSince.IsZero() && filterUntil.IsZero() {
 		entries = entries[len(entries)-100:]
 	}
 
-	reviewed, _ := loadReviewed()
-	watchlist, _ := loadWatchlist()
-	pinned, _ := loadPinned()
-	watchedDeployers, _ := loadWatchedDeployers()
-	commandHistory, _ := loadCommandHistory()
+	reviewed := savedState.ReviewedSet
+	if reviewed == nil {
+		reviewed = make(map[string]bool)
+	}
+	watchlist := savedState.WatchlistSet
+	if watchlist == nil {
+		watchlist = make(map[string]bool)
+	}
+	pinned := savedState.PinnedSet
+	if pinned == nil {
+		pinned = make(map[string]bool)
+	}
+	watchedDeployers := savedState.WatchedDeployersSet
+	if watchedDeployers == nil {
+		watchedDeployers = make(map[string]bool)
+	}
+	commandHistory := savedState.CommandHistory
 
 	// Initial sort
-	sort.Slice(entries, func(i, j int) bool {
-		if pinned[entries[i].Contract] != pinned[entries[j].Contract] {
-			return pinned[entries[i].Contract]
-		}
-		if entries[i].RiskScore != entries[j].RiskScore {
-			return entries[i].RiskScore > entries[j].RiskScore
-		}
-		return entries[i].Block > entries[j].Block
-	})
-
-	var initialListItems []list.Item
-	for _, e := range entries {
-		it := item{LogEntry: e, watched: watchlist[e.Contract], pinned: pinned[e.Contract], watchedDeployer: watchedDeployers[e.Deployer]}
-		if !reviewed[getReviewKey(e)] {
-			initialListItems = append(initialListItems, it)
-		}
-	}
-
+	util.SortEntries(entries, util.SortRiskDesc, pinned)
 	delegate := list.NewDefaultDelegate()
 	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder(), false, false, false, true).
@@ -3120,7 +3462,7 @@ func main() {
 		Foreground(lipgloss.Color("242"))
 	delegate.SetHeight(4) // Increase height to accommodate multi-line flags
 
-	l := list.New(initialListItems, delegate, 0, 0)
+	l := list.New(nil, delegate, 0, 0)
 	l.Title = "🚨 ETH Watchtower Alerts"
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false) // Disable default list filtering in favor of custom search
@@ -3134,51 +3476,43 @@ func main() {
 	ci.Placeholder = "Type a command..."
 	ci.Width = 40
 
-	m := model{
-		list:  l,
-		items: entries,
-		// Initialize state
-		fileOffset:          offset,
-		contractsSet:        make(map[string]bool),
-		deployersSet:        make(map[string]bool),
-		reviewedSet:         reviewed,
-		watchlistSet:        watchlist,
-		pinnedSet:           pinned,
-		watchedDeployersSet: watchedDeployers,
-		filterSince:         filterSince,
-		filterUntil:         filterUntil,
-		searchInput:         ti,
-		help:                help.New(),
-		showSidePane:        false,
-		maxRiskScore:        *maxRiskFlag,
-		minRiskScore:        *minRiskFlag,
-		heatmapZoom:         1.0,
-		heatmapCenter:       0.5,
-		heatmapFollow:       true,
-		showFooterHelp:      true,
-		commandInput:        ci,
-		filteredCommands:    availableCommands,
-		commandHistory:      commandHistory,
-		rpcUrls:             cfg.RpcUrls,
+	initialSidePaneWidth := cfg.DefaultSidePaneWidth
+	if savedState.SidePaneWidth > 0 {
+		initialSidePaneWidth = savedState.SidePaneWidth
 	}
 
-	// Calculate initial stats
-	m.updateStats(entries)
-
-	// Check for high risk in recent entries (missed while closed)
+	var latestHighRiskEntry *stats.LogEntry
+	var highRiskBanner string
 	for _, e := range recent {
 		if e.RiskScore >= 50 {
 			entryCopy := e
-			m.latestHighRiskEntry = &entryCopy
-			m.highRiskBanner = " ⚠️  HIGH RISK DETECTED (MISSED) ⚠️ "
+			latestHighRiskEntry = &entryCopy
+			highRiskBanner = " ⚠️  HIGH RISK DETECTED (MISSED) ⚠️ "
 			break
 		}
 	}
 
-	// Save the updated offset immediately
-	saveState(offset)
+	initialModel := tui.NewModel(tui.InitMsg{
+		Items:               entries,
+		FileOffset:          offset,
+		ReviewedSet:         reviewed,
+		WatchlistSet:        watchlist,
+		PinnedSet:           pinned,
+		WatchedDeployersSet: watchedDeployers,
+		FilterSince:         filterSince,
+		FilterUntil:         filterUntil,
+		MaxRiskScore:        *maxRiskFlag,
+		MinRiskScore:        *minRiskFlag,
+		CommandHistory:      commandHistory,
+		RpcUrls:             cfg.RpcUrls,
+		SidePaneWidth:       initialSidePaneWidth,
+		LatestHighRiskEntry: latestHighRiskEntry,
+		HighRiskBanner:      highRiskBanner,
+		LogFilePath:         logFilePath,
+		StateFilePath:       cfg.StateFilePath,
+	})
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(initialModel, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Println("Error running program:", err)
