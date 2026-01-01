@@ -305,10 +305,6 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// but adapted to use the new Model fields and methods.
 	// I will implement a simplified version here to make it compile.
 
-	if key.Matches(msg, AppKeys.Quit) { // Assuming Quit is mapped or handled by 'q'
-		// Handled below
-	}
-
 	// Handle global keys
 	switch {
 	case msg.String() == "q":
@@ -378,7 +374,7 @@ func (m *Model) executeCommand(id string) (tea.Model, tea.Cmd) {
 			BorderLeftForeground(lipgloss.Color("212")).
 			Foreground(lipgloss.Color("212")).
 			Padding(0, 0, 0, 1)
-		delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().
+		delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.
 			Foreground(lipgloss.Color("242"))
 		if m.CompactMode {
 			delegate.SetHeight(2)
@@ -727,7 +723,7 @@ func (m *Model) openFilterList(filterType string) {
 
 	delegate := list.NewDefaultDelegate()
 	delegate.Styles.SelectedTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Border(lipgloss.NormalBorder(), false, false, false, true).BorderLeftForeground(lipgloss.Color("205")).Padding(0, 0, 0, 1)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().Foreground(lipgloss.Color("240"))
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Foreground(lipgloss.Color("240"))
 
 	l := list.New(items, delegate, 40, 20)
 	l.Title = title
@@ -864,7 +860,7 @@ func (m Model) heatmapView() string {
 
 			if count > 0 {
 				intensity := float64(count) / float64(maxCount)
-				symbol := "·"
+				var symbol string
 				if intensity > 0.75 {
 					symbol = "█"
 				} else if intensity > 0.5 {

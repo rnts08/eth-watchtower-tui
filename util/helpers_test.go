@@ -32,7 +32,7 @@ func TestParseTimeFilter(t *testing.T) {
 		t.Errorf("ParseTimeFilter(1h) error: %v", err)
 	}
 	if time.Since(tm) < time.Hour-time.Second || time.Since(tm) > time.Hour+time.Second {
-		// Approximate check
+		t.Errorf("ParseTimeFilter(1h) = %v, want approx 1h ago", tm)
 	}
 
 	// RFC3339

@@ -78,11 +78,11 @@ func CreateDefault() error {
 
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
-		return fmt.Errorf("Error generating config: %v", err)
+		return fmt.Errorf("error generating config: %v", err)
 	}
 
 	if err := os.WriteFile("config.json", data, 0644); err != nil {
-		return fmt.Errorf("Error writing config.json: %v", err)
+		return fmt.Errorf("error writing config.json: %v", err)
 	}
 	fmt.Println("Generated default config.json")
 	return nil

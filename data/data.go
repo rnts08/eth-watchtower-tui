@@ -47,7 +47,7 @@ func SaveState(path string, state PersistentState) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	encoder := gob.NewEncoder(file)
 	return encoder.Encode(state)
@@ -61,7 +61,7 @@ func LoadState(path string) (PersistentState, error) {
 		}
 		return PersistentState{}, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	var state PersistentState
 	decoder := gob.NewDecoder(file)
@@ -76,7 +76,7 @@ func ReadLogEntries(path string, offset int64) ([]stats.LogEntry, int64, error) 
 	if err != nil {
 		return nil, offset, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	stat, err := file.Stat()
 	if err != nil {
@@ -106,7 +106,7 @@ func ReadLogHistory(path string, limit int64) ([]stats.LogEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	stat, err := file.Stat()
 	if err != nil {
