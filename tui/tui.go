@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"eth-watchtower-tui/config"
 	"eth-watchtower-tui/data"
 	"eth-watchtower-tui/stats"
 	"eth-watchtower-tui/util"
@@ -20,6 +22,8 @@ import (
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -27,6 +31,8 @@ import (
 
 var FlagDescriptions = make(map[string]string)
 var FlagCategories = make(map[string]string)
+
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 func NewModel(msg InitMsg) *Model {
 	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
@@ -46,8 +52,39 @@ func NewModel(msg InitMsg) *Model {
 	tagInput := textinput.New()
 	tagInput.Width = 40
 
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(ColorAccent))
+
+	prog := progress.New(progress.WithDefaultGradient())
+	prog.Width = 50
+
+	var configInputs []textinput.Model
+	if msg.InConfigMode {
+		labels := []string{"Log File Path", "Min Risk Score", "Max Risk Score", "RPC URLs (comma sep)", "Etherscan API Key", "CoinMarketCap API Key"}
+		defaults := []string{
+			msg.LogFilePath,
+			fmt.Sprintf("%d", msg.MinRiskScore),
+			fmt.Sprintf("%d", msg.MaxRiskScore),
+			strings.Join(msg.RpcUrls, ","),
+			msg.EtherscanApiKey,
+			msg.CoinmarketcapApiKey,
+		}
+
+		for i := range labels {
+			t := textinput.New()
+			t.Placeholder = labels[i]
+			t.SetValue(defaults[i])
+			t.Width = 50
+			configInputs = append(configInputs, t)
+		}
+		configInputs[0].Focus()
+	}
+
 	m := &Model{
 		List:                     l,
+		Spinner:                  s,
+		Progress:                 prog,
 		Items:                    msg.Items,
 		Stats:                    stats.New(),
 		FileOffset:               msg.FileOffset,
@@ -85,28 +122,91 @@ func NewModel(msg InitMsg) *Model {
 		ApiHealth:                make(map[string]string),
 		LatencyThresholds:        msg.LatencyThresholds,
 		DB:                       msg.DB,
+		InConfigMode:             msg.InConfigMode,
+		ConfigInputs:             configInputs,
+		AlertMsg:                 "Initializing...",
 	}
-
-	m.Stats.Process(m.Items)
-	util.SortEntries(m.Items, m.SortMode, m.PinnedSet)
 
 	return m
 }
 
-func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{data.WaitForFileChange(m.LogFilePath, m.FileOffset), m.updateListItems(), m.runHealthChecks()}
-	if m.HighRiskBanner != "" {
-		cmds = append(cmds, tea.Tick(5*time.Second, func(_ time.Time) tea.Msg {
-			return CloseHighRiskAlertMsg{}
-		}))
+func doInit(m *Model) tea.Cmd {
+	return func() tea.Msg {
+		if m.initProgressCh != nil {
+			m.initProgressCh <- "Finalizing state..."
+		}
+		// m.Stats.Process(m.Items) // Stats are now pre-processed in main.go
+		if m.initProgressCh != nil {
+			m.initProgressCh <- "Sorting entries..."
+		}
+		util.SortEntries(m.Items, m.SortMode, m.PinnedSet)
+		if m.initProgressCh != nil {
+			m.initProgressCh <- "Running health checks..."
+			close(m.initProgressCh)
+		}
+		// Health checks are already async, but we can wrap them if needed
+		// For now, we just signal completion.
+		return initCompleteMsg{}
 	}
-	return tea.Batch(cmds...)
+}
+
+func waitForProgress(sub chan string) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-sub
+		if !ok {
+			return nil // Channel closed
+		}
+		return ProgressMsg(msg)
+	}
+}
+
+func (m *Model) Init() tea.Cmd {
+	m.initProgressCh = make(chan string)
+	return tea.Batch(
+		m.Spinner.Tick,
+		doInit(m),
+		waitForProgress(m.initProgressCh),
+		fetchGlobalData(m.RpcUrls, m.CoinmarketcapApiKey),
+		tea.Tick(1*time.Minute, func(t time.Time) tea.Msg {
+			return fetchGlobalData(m.RpcUrls, m.CoinmarketcapApiKey)()
+		}),
+	)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
 
+	if !m.Ready {
+		switch msg := msg.(type) {
+		case initCompleteMsg:
+			m.Ready = true
+			m.AlertMsg = "" // Clear "Initializing..."
+			cmds = append(cmds, data.WaitForFileChange(m.LogFilePath, m.FileOffset), m.updateListItems(), m.runHealthChecks())
+			return m, tea.Batch(cmds...)
+		case ProgressMsg:
+			m.AlertMsg = string(msg)
+			var percent float64
+			switch m.AlertMsg {
+			case "Finalizing state...":
+				percent = 0.25
+			case "Sorting entries...":
+				percent = 0.75
+			case "Running health checks...":
+				percent = 1.0
+			}
+			cmds = append(cmds, m.Progress.SetPercent(percent))
+			cmds = append(cmds, waitForProgress(m.initProgressCh))
+			return m, tea.Batch(cmds...)
+		case spinner.TickMsg:
+			m.Spinner, cmd = m.Spinner.Update(msg)
+			return m, cmd
+		}
+	}
+
+	if m.InConfigMode {
+		return m.updateConfigView(msg)
+	}
 	if m.ShowingHelp {
 		return m.updateHelp(msg)
 	}
@@ -157,7 +257,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.SidePaneWidth = targetWidth
 		}
 		m.resize(msg.Width, msg.Height)
-		m.Ready = true
 
 	case data.EntriesMsg:
 		if msg.Err != nil {
@@ -248,6 +347,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.RpcLatency = msg.Latency
+		if msg.UsedURL != "" {
+			m.ActiveRpcUrl = msg.UsedURL
+		}
+		return m, nil
+
+	case GlobalDataMsg:
+		m.EthPrice = msg.EthPrice
+		m.GasPrice = msg.GasPrice
 		return m, nil
 
 	case VerificationStatusMsg:
@@ -285,9 +392,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	if !m.Ready {
-		return "Initializing..."
+		msg := "Initializing..."
+		if m.AlertMsg != "" {
+			msg = m.AlertMsg
+		}
+		return fmt.Sprintf("\n\n   %s %s\n\n   %s\n\n", m.Spinner.View(), msg, m.Progress.View())
 	}
 
+	if m.InConfigMode {
+		return m.renderConfigView()
+	}
 	if m.ConfirmingQuit {
 		return m.renderConfirmation(PromptQuit)
 	}
@@ -432,6 +546,21 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.ConfirmingDelete {
+		if key.Matches(msg, AppKeys.Quit) {
+			m.ConfirmingDelete = false
+			return m, nil
+		}
+		switch msg.String() {
+		case "y", "Y":
+			return m.executeCommand("delete_saved_contract")
+		case "n", "N":
+			m.ConfirmingDelete = false
+			return m, nil
+		}
+		return m, nil
+	}
+
 	if m.ConfirmingQuit {
 		if key.Matches(msg, AppKeys.Quit) {
 			m.ConfirmingQuit = false
@@ -530,6 +659,9 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				})
 			}
 			return m, nil
+		}
+		if key.Matches(msg, AppKeys.SaveContract) {
+			return m.executeCommand("save_contract_details")
 		}
 
 		m.Viewport, cmd = m.Viewport.Update(msg)
@@ -832,9 +964,7 @@ func (m Model) renderComparisonView() string {
 	styleValue := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText))
 	styleDiff := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorCriticalRisk))
 	styleLogKey := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSecondary))
-	styleLogVal := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText))
 	styleLogAddr := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorAccent))
-	styleLogNum := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess))
 
 	renderBlock := func(data *BlockchainData, title string) string {
 		var sb strings.Builder
@@ -921,6 +1051,140 @@ func (m Model) renderComparisonView() string {
 	help := lipgloss.NewStyle().Faint(true).Render("(esc to close)")
 
 	return AppStyle.Render(lipgloss.JoinVertical(lipgloss.Left, header, "\n", content, "\n", help))
+}
+
+func (m *Model) updateConfigView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "tab", "shift+tab", "enter", "up", "down":
+			s := msg.String()
+
+			if s == "enter" && m.ConfigFocusIndex == len(m.ConfigInputs) {
+				// Save config
+				minRisk, _ := strconv.Atoi(m.ConfigInputs[1].Value())
+				maxRisk, _ := strconv.Atoi(m.ConfigInputs[2].Value())
+				rpcs := strings.Split(m.ConfigInputs[3].Value(), ",")
+				for i := range rpcs {
+					rpcs[i] = strings.TrimSpace(rpcs[i])
+					// Basic validation
+					if rpcs[i] != "" {
+						if _, err := url.ParseRequestURI(rpcs[i]); err != nil {
+							m.AlertMsg = fmt.Sprintf("Invalid RPC URL: %s", rpcs[i])
+							return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return ClearAlertMsg{} })
+						}
+					}
+				}
+				if len(rpcs) == 0 || (len(rpcs) == 1 && rpcs[0] == "") {
+					rpcs = []string{"https://eth.llamarpc.com"} // Fallback default
+				}
+
+				cfg := config.Config{
+					LogFilePath:         m.ConfigInputs[0].Value(),
+					MinRiskScore:        minRisk,
+					MaxRiskScore:        maxRisk,
+					RpcUrls:             rpcs,
+					EtherscanApiKey:     m.ConfigInputs[4].Value(),
+					CoinmarketcapApiKey: m.ConfigInputs[5].Value(),
+					// Preserve defaults for others or load them if needed
+					DatabasePath:             "eth-watchtower.db",
+					DefaultSidePaneWidth:     30,
+					ExplorerApiUrl:           "https://api.etherscan.io",
+					ExplorerVerificationPath: "/api?module=contract&action=getsourcecode&address=%s&apikey=%s",
+					LatencyThresholds: config.LatencyThresholds{
+						Medium: 200,
+						High:   500,
+					},
+				}
+				if m.DB != nil {
+					_ = m.DB.SaveConfig(cfg)
+				}
+				m.InConfigMode = false
+				// Re-init with new config values would be ideal, but for now just close view
+				// In a real app, we might want to reload everything or restart.
+				// For this flow, we assume main.go handles initial load, so this is "first run setup".
+				// We can update model fields directly.
+				m.LogFilePath = cfg.LogFilePath
+				m.MinRiskScore = cfg.MinRiskScore
+				m.MaxRiskScore = cfg.MaxRiskScore
+				m.RpcUrls = cfg.RpcUrls
+				m.EtherscanApiKey = cfg.EtherscanApiKey
+				m.CoinmarketcapApiKey = cfg.CoinmarketcapApiKey
+
+				// Re-run health checks with new RPCs
+				m.ApiHealth = make(map[string]string)
+
+				return m, tea.Batch(data.WaitForFileChange(m.LogFilePath, m.FileOffset), m.updateListItems(), m.runHealthChecks(), func() tea.Msg { return ClearAlertMsg{} })
+			}
+
+			if s == "up" || s == "shift+tab" {
+				m.ConfigFocusIndex--
+			} else {
+				m.ConfigFocusIndex++
+			}
+
+			if m.ConfigFocusIndex > len(m.ConfigInputs) {
+				m.ConfigFocusIndex = 0
+			} else if m.ConfigFocusIndex < 0 {
+				m.ConfigFocusIndex = len(m.ConfigInputs)
+			}
+
+			// Handle Esc to cancel editing if not in initial setup
+			if s == "esc" && m.DB != nil { // Assuming DB != nil implies app is running
+				m.InConfigMode = false
+				return m, nil
+			}
+
+			cmds := make([]tea.Cmd, len(m.ConfigInputs))
+			for i := 0; i <= len(m.ConfigInputs)-1; i++ {
+				if i == m.ConfigFocusIndex {
+					cmds[i] = m.ConfigInputs[i].Focus()
+					continue
+				}
+				m.ConfigInputs[i].Blur()
+			}
+			return m, tea.Batch(cmds...)
+		}
+	}
+
+	// Handle Esc to cancel editing if not in initial setup
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && key.Matches(keyMsg, AppKeys.Quit) && m.DB != nil {
+		m.InConfigMode = false
+		return m, nil
+	}
+	if m.ConfigFocusIndex < len(m.ConfigInputs) {
+		m.ConfigInputs[m.ConfigFocusIndex], cmd = m.ConfigInputs[m.ConfigFocusIndex].Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m Model) renderConfigView() string {
+	var sb strings.Builder
+	sb.WriteString(TitleStyle.Render(" Configuration Setup ") + "\n\n")
+
+	labels := []string{"Log File Path", "Min Risk Score", "Max Risk Score", "RPC URLs", "Etherscan API Key", "CoinMarketCap API Key"}
+
+	for i, input := range m.ConfigInputs {
+		label := labels[i]
+		if i == m.ConfigFocusIndex {
+			label = lipgloss.NewStyle().Foreground(lipgloss.Color(ColorAccent)).Bold(true).Render(label)
+		}
+		sb.WriteString(fmt.Sprintf("%-25s %s\n", label, input.View()))
+	}
+
+	btnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText)).Border(lipgloss.RoundedBorder()).Padding(0, 2).MarginTop(2)
+	if m.ConfigFocusIndex == len(m.ConfigInputs) {
+		btnStyle = btnStyle.Foreground(lipgloss.Color(ColorAccent)).BorderForeground(lipgloss.Color(ColorAccent))
+	}
+	sb.WriteString(btnStyle.Render("Save & Continue"))
+
+	if m.DB != nil {
+		sb.WriteString("\n\n" + lipgloss.NewStyle().Faint(true).Render("(Esc to cancel)"))
+	}
+
+	return AppStyle.Render(lipgloss.Place(m.WindowWidth, m.WindowHeight, lipgloss.Center, lipgloss.Center, sb.String()))
 }
 
 func (m Model) sideView() string {
@@ -1451,7 +1715,7 @@ func (m Model) renderCheatSheet() string {
 		{"D", "Deployer view"}, {"T", "Timeline view"},
 		{"B", "Toggle auto-verify"}, {"tab", "Focus sidebar"},
 		{"e", "Filter token type"}, {"E", "Clear token filter"},
-		{"C", "Saved contracts"}, {"=", "Compare contract"}, {"t", "Tag contract"},
+		{"C", "Saved contracts"}, {"=", "Compare contract"}, {"t", "Tag contract"}, {"ctrl+e", "Edit config"}, {"ctrl+s", "Save contract"},
 	}
 
 	mid := (len(shortcuts) + 1) / 2
@@ -1748,21 +2012,33 @@ func (m Model) statsView() string {
 	s += styleDim.Render("Latency: ") + latStyle.Render(lat)
 
 	s += styleDim.Render(" | ")
-	apiStatus := "OK"
-	apiColor := styleGood
 	if len(m.ApiHealth) == 0 {
-		apiStatus = "Checking"
-		apiColor = styleDim
+		s += styleDim.Render("API: ") + styleDim.Render("Checking")
 	} else {
-		for _, st := range m.ApiHealth {
-			if strings.HasPrefix(st, "Error") {
-				apiStatus = "Error"
-				apiColor = styleErr
-				break
-			}
+		var apiStatuses []string
+		// Etherscan
+		expStatus := m.ApiHealth[m.ExplorerApiUrl]
+		if expStatus == "OK" {
+			apiStatuses = append(apiStatuses, styleGood.Render("EXP"))
+		} else if expStatus != "" {
+			apiStatuses = append(apiStatuses, styleErr.Render("EXP"))
 		}
+		// CoinMarketCap
+		cmcStatus := m.ApiHealth["CoinMarketCap"]
+		if cmcStatus == "OK" {
+			apiStatuses = append(apiStatuses, styleGood.Render("CMC"))
+		} else if cmcStatus != "" {
+			apiStatuses = append(apiStatuses, styleErr.Render("CMC"))
+		}
+		s += styleDim.Render("API: ") + strings.Join(apiStatuses, " ")
 	}
-	s += styleDim.Render("API: ") + apiColor.Render(apiStatus)
+
+	if m.EthPrice != "" {
+		s += styleDim.Render(" | ETH: ") + styleGood.Render(m.EthPrice)
+	}
+	if m.GasPrice != "" {
+		s += styleDim.Render(" | Gas: ") + styleGood.Render(m.GasPrice+" Gwei")
+	}
 
 	status := "LIVE"
 	if m.Paused {
@@ -1998,30 +2274,33 @@ func renderDetail(e stats.LogEntry, width int, selectedFlagIdx int, data *Blockc
 func fetchVerificationStatus(explorerURL, verificationPath, apiKey, contract string) tea.Cmd {
 	return func() tea.Msg {
 		apiURL := fmt.Sprintf("%s%s", explorerURL, fmt.Sprintf(verificationPath, contract, apiKey))
-		resp, err := http.Get(apiURL)
+		resp, err := httpClient.Get(apiURL)
 		if err != nil {
 			return VerificationStatusMsg{Contract: contract, Error: err}
 		}
 		defer func() { _ = resp.Body.Close() }()
 
 		var esRes struct {
-			Status  string `json:"status"`
-			Message string `json:"message"`
-			Result  []struct {
-				SourceCode string `json:"SourceCode"`
-				ABI        string `json:"ABI"`
-			} `json:"result"`
+			Status  string          `json:"status"`
+			Message string          `json:"message"`
+			Result  json.RawMessage `json:"result"`
 		}
 
 		if err := json.NewDecoder(resp.Body).Decode(&esRes); err != nil {
 			return VerificationStatusMsg{Contract: contract, Error: err}
 		}
 
-		if esRes.Status == "1" && len(esRes.Result) > 0 {
-			if esRes.Result[0].SourceCode != "" {
-				return VerificationStatusMsg{Contract: contract, Status: "Verified", ABI: esRes.Result[0].ABI}
+		if esRes.Status == "1" {
+			var results []struct {
+				SourceCode string `json:"SourceCode"`
+				ABI        string `json:"ABI"`
 			}
-			return VerificationStatusMsg{Contract: contract, Status: "Unverified"}
+			if err := json.Unmarshal(esRes.Result, &results); err == nil && len(results) > 0 {
+				if results[0].SourceCode != "" {
+					return VerificationStatusMsg{Contract: contract, Status: "Verified", ABI: results[0].ABI}
+				}
+				return VerificationStatusMsg{Contract: contract, Status: "Unverified"}
+			}
 		}
 
 		if esRes.Message != "" && esRes.Message != "OK" {
@@ -2062,7 +2341,7 @@ func fetchBlockchainData(rpcURLs []string, contract, txHash, cmcApiKey string) t
 				ID:      1,
 			}
 			b, _ := json.Marshal(reqBody)
-			resp, err := http.Post(rpcURL, "application/json", bytes.NewReader(b))
+			resp, err := httpClient.Post(rpcURL, "application/json", bytes.NewReader(b))
 			if err != nil {
 				return "", err
 			}
@@ -2286,7 +2565,6 @@ func decodeAbiString(hexStr string) string {
 }
 
 func fetchTokenPrice(apiKey, symbol, contract string) (string, string, string, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
 	req, _ := http.NewRequest("GET", "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest", nil)
 	q := req.URL.Query()
 	q.Add("symbol", symbol)
@@ -2294,11 +2572,11 @@ func fetchTokenPrice(apiKey, symbol, contract string) (string, string, string, e
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("X-CMC_PRO_API_KEY", apiKey)
 
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", "", "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		Data map[string][]struct {
@@ -2502,7 +2780,7 @@ func (m *Model) generateMainHelpPage(width int) string {
 		allBindings = append(allBindings, group...)
 	}
 	// Add other keys not in FullHelp
-	allBindings = append(allBindings, AppKeys.Filter, AppKeys.IncreaseRisk, AppKeys.DecreaseRisk, AppKeys.IncreaseMaxRisk, AppKeys.DecreaseMaxRisk, AppKeys.Heatmap, AppKeys.ZoomIn, AppKeys.ZoomOut, AppKeys.HeatmapReset, AppKeys.HeatmapLeft, AppKeys.HeatmapRight, AppKeys.Compact, AppKeys.ToggleFooter, AppKeys.HeatmapFollow, AppKeys.JumpToAlert, AppKeys.StatsView, AppKeys.CheatSheet, AppKeys.IncreaseSidePane, AppKeys.DecreaseSidePane, AppKeys.FilterTokenType, AppKeys.ClearTokenTypeFilter, AppKeys.ToggleWatchlist, AppKeys.ToggleAutoVerify, AppKeys.DeployerView, AppKeys.TimelineView, AppKeys.SidebarFocus, AppKeys.ViewSavedContracts, AppKeys.CompareContract, AppKeys.TagContract)
+	allBindings = append(allBindings, AppKeys.Filter, AppKeys.IncreaseRisk, AppKeys.DecreaseRisk, AppKeys.IncreaseMaxRisk, AppKeys.DecreaseMaxRisk, AppKeys.Heatmap, AppKeys.ZoomIn, AppKeys.ZoomOut, AppKeys.HeatmapReset, AppKeys.HeatmapLeft, AppKeys.HeatmapRight, AppKeys.Compact, AppKeys.ToggleFooter, AppKeys.HeatmapFollow, AppKeys.JumpToAlert, AppKeys.StatsView, AppKeys.CheatSheet, AppKeys.IncreaseSidePane, AppKeys.DecreaseSidePane, AppKeys.FilterTokenType, AppKeys.ClearTokenTypeFilter, AppKeys.ToggleWatchlist, AppKeys.ToggleAutoVerify, AppKeys.DeployerView, AppKeys.TimelineView, AppKeys.SidebarFocus, AppKeys.ViewSavedContracts, AppKeys.CompareContract, AppKeys.TagContract, AppKeys.EditConfig, AppKeys.SaveContract)
 
 	// Create a map to format keys nicely
 	keyDisplayMap := map[string]string{
@@ -2597,18 +2875,20 @@ func (m *Model) runHealthChecks() tea.Cmd {
 	if m.ExplorerApiUrl != "" {
 		cmds = append(cmds, checkExplorerHealth(m.ExplorerApiUrl))
 	}
+	if m.CoinmarketcapApiKey != "" {
+		cmds = append(cmds, checkCmcHealth(m.CoinmarketcapApiKey))
+	}
 	return tea.Batch(cmds...)
 }
 
 func checkRpcHealth(url string) tea.Cmd {
 	return func() tea.Msg {
-		client := http.Client{Timeout: 5 * time.Second}
 		reqBody := `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
-		resp, err := client.Post(url, "application/json", strings.NewReader(reqBody))
+		resp, err := httpClient.Post(url, "application/json", strings.NewReader(reqBody))
 		if err != nil {
 			return ApiHealthMsg{URL: url, Status: "Error: " + err.Error()}
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 400 {
 			return ApiHealthMsg{URL: url, Status: fmt.Sprintf("Error: HTTP %d", resp.StatusCode)}
 		}
@@ -2616,15 +2896,95 @@ func checkRpcHealth(url string) tea.Cmd {
 	}
 }
 
+func checkCmcHealth(apiKey string) tea.Cmd {
+	return func() tea.Msg {
+		req, _ := http.NewRequest("GET", "https://pro-api.coinmarketcap.com/v1/key/info", nil)
+		req.Header.Add("X-CMC_PRO_API_KEY", apiKey)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return ApiHealthMsg{URL: "CoinMarketCap", Status: "Error: " + err.Error()}
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode >= 400 {
+			return ApiHealthMsg{URL: "CoinMarketCap", Status: fmt.Sprintf("Error: HTTP %d", resp.StatusCode)}
+		}
+		return ApiHealthMsg{URL: "CoinMarketCap", Status: "OK"}
+	}
+}
+
+func fetchGlobalData(rpcUrls []string, cmcApiKey string) tea.Cmd {
+	return func() tea.Msg {
+		var ethPrice, gasPrice string
+		var lastErr error
+
+		// Fetch Gas Price
+		if len(rpcUrls) > 0 {
+			// Simplified: use the first RPC URL
+			rpcURL := rpcUrls[0]
+			reqBody := `{"jsonrpc":"2.0","method":"eth_gasPrice","params":[],"id":1}`
+			resp, err := httpClient.Post(rpcURL, "application/json", strings.NewReader(reqBody))
+			if err == nil {
+				defer func() { _ = resp.Body.Close() }()
+				var res struct {
+					Result string `json:"result"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&res) == nil && res.Result != "" {
+					gp := new(big.Int)
+					gp.SetString(res.Result[2:], 16)
+					bf := new(big.Float).SetInt(gp)
+					gwei := new(big.Float).Quo(bf, big.NewFloat(1e9))
+					gasPrice = gwei.Text('f', 0)
+				}
+			} else {
+				lastErr = err
+			}
+		}
+
+		// Fetch ETH Price
+		if cmcApiKey != "" {
+			req, _ := http.NewRequest("GET", "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest", nil)
+			q := req.URL.Query()
+			q.Add("symbol", "ETH")
+			req.URL.RawQuery = q.Encode()
+			req.Header.Add("X-CMC_PRO_API_KEY", cmcApiKey)
+			resp, err := httpClient.Do(req)
+			if err == nil {
+				defer func() { _ = resp.Body.Close() }()
+				var result struct {
+					Data map[string][]struct {
+						Quote struct {
+							USD struct {
+								Price float64 `json:"price"`
+							} `json:"USD"`
+						} `json:"quote"`
+					} `json:"data"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&result) == nil {
+					if ethData, ok := result.Data["ETH"]; ok && len(ethData) > 0 {
+						ethPrice = fmt.Sprintf("$%.2f", ethData[0].Quote.USD.Price)
+					}
+				}
+			} else {
+				lastErr = err
+			}
+		}
+
+		return GlobalDataMsg{
+			EthPrice: ethPrice,
+			GasPrice: gasPrice,
+			Error:    lastErr,
+		}
+	}
+}
+
 func checkExplorerHealth(url string) tea.Cmd {
 	return func() tea.Msg {
-		client := http.Client{Timeout: 5 * time.Second}
 		// Just check if the base URL is reachable
-		resp, err := client.Get(url)
+		resp, err := httpClient.Get(url)
 		if err != nil {
 			return ApiHealthMsg{URL: url, Status: "Error: " + err.Error()}
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 400 {
 			return ApiHealthMsg{URL: url, Status: fmt.Sprintf("Error: HTTP %d", resp.StatusCode)}
 		}

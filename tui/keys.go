@@ -60,6 +60,8 @@ type KeyMap struct {
 	CompareContract      key.Binding
 	DeleteSavedContract  key.Binding
 	TagContract          key.Binding
+	EditConfig           key.Binding
+	SaveContract         key.Binding
 }
 
 // AppKeys defines the keybindings for the application.
@@ -177,6 +179,8 @@ var AppKeys = KeyMap{
 	CompareContract:    key.NewBinding(key.WithKeys("="), key.WithHelp("=", "compare with saved")),
 	DeleteSavedContract: key.NewBinding(key.WithKeys("x", "delete"), key.WithHelp("x", "delete saved")),
 	TagContract:         key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tag contract")),
+	EditConfig:          key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("ctrl+e", "edit config")),
+	SaveContract:        key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save contract")),
 	Quit: key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q", "quit")),
 }
 
@@ -237,4 +241,6 @@ var availableCommands = []CommandItem{
 	{"Compare Contract", "Compare current contract with a saved one", "compare_contract"},
 	{"Delete Saved Contract", "Delete selected saved contract", "delete_saved_contract"},
 	{"Tag Contract", "Add/Edit tags for saved contract", "tag_contract"},
+	{"Edit Configuration", "Open configuration editor", "edit_config"},
+	{"Save Contract", "Save current contract details", "save_contract_details"},
 }

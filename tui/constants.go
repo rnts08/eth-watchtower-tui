@@ -41,7 +41,7 @@ const (
 	PromptConfirm = "(y) Yes    (n) No"
 
 	// Help Text
-	HelpDetailView = "(esc: back, J: JSON, i: toggle info, v: verify, A: view ABI, h: copy tx hash, o: open, r: refresh)"
+	HelpDetailView = "(esc: back, J: JSON, i: toggle info, v: verify, A: view ABI, h: copy tx hash, o: open, r: refresh, ctrl+s: save)"
 	HelpNav        = "Use ←/→ to navigate pages, ↑/↓ to scroll, q to close."
 
 	// Colors

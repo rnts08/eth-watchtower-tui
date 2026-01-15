@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"eth-watchtower-tui/db"
 )
 
 const defaultSidePaneWidth = 30
@@ -40,7 +42,7 @@ type LatencyThresholds struct {
 	High   int `json:"high"`   // Milliseconds
 }
 
-func Load() Config {
+func Load(database *db.DB) (Config, bool) {
 	c := Config{
 		LogFilePath:          "eth-watchtower.jsonl",
 		DatabasePath:         "eth-watchtower.db",
@@ -67,10 +69,15 @@ func Load() Config {
 		},
 	}
 
-	if data, err := os.ReadFile("config.json"); err == nil {
-		_ = json.Unmarshal(data, &c)
+	// Try to load from DB first
+	if database != nil {
+		found, err := database.LoadConfig(&c)
+		if found && err == nil {
+			return c, true
+		}
 	}
-	return c
+
+	return c, false
 }
 
 func CreateDefault() error {

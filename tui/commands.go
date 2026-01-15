@@ -9,6 +9,7 @@ import (
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -71,6 +72,7 @@ var commandHandlers = map[string]commandHandler{
 	"compare_contract":        handleCompareContract,
 	"delete_saved_contract":   handleDeleteSavedContract,
 	"tag_contract":            handleTagContract,
+	"edit_config":             handleEditConfig,
 }
 
 func handlePause(m *Model) (tea.Model, tea.Cmd) {
@@ -79,6 +81,33 @@ func handlePause(m *Model) (tea.Model, tea.Cmd) {
 		m.AlertMsg = ""
 		return m, m.updateListItems()
 	}
+	return m, nil
+}
+
+func handleEditConfig(m *Model) (tea.Model, tea.Cmd) {
+	m.InConfigMode = true
+	m.ConfigFocusIndex = 0
+
+	// Populate inputs with current config
+	labels := []string{"Log File Path", "Min Risk Score", "Max Risk Score", "RPC URLs (comma sep)", "Etherscan API Key", "CoinMarketCap API Key"}
+	defaults := []string{
+		m.LogFilePath,
+		fmt.Sprintf("%d", m.MinRiskScore),
+		fmt.Sprintf("%d", m.MaxRiskScore),
+		strings.Join(m.RpcUrls, ","),
+		m.EtherscanApiKey,
+		m.CoinmarketcapApiKey,
+	}
+
+	m.ConfigInputs = make([]textinput.Model, len(labels))
+	for i := range labels {
+		t := textinput.New()
+		t.Placeholder = labels[i]
+		t.SetValue(defaults[i])
+		t.Width = 50
+		m.ConfigInputs[i] = t
+	}
+	m.ConfigInputs[0].Focus()
 	return m, nil
 }
 
@@ -125,7 +154,7 @@ func handleCompareContract(m *Model) (tea.Model, tea.Cmd) {
 			savedDataJSON, err := m.DB.GetSavedContract(m.DetailData.Contract)
 			if err == nil && savedDataJSON != "" {
 				// Found a saved version, load it and show comparison
-				var savedData BlockchainData
+				// var savedData BlockchainData
 				// We need to unmarshal. Since we don't have json import here, we'll delegate to a method on Model or just do it if we add import.
 				// For simplicity, let's assume we can trigger a command that does the heavy lifting or just open the saved contracts list to pick one.
 				// Actually, a better UX might be: Press '=' -> Open list of saved contracts -> Pick one -> Show Diff.

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 
+	"eth-watchtower-tui/stats"
+
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -22,6 +24,7 @@ type PersistentState struct {
 	PinnedSet           map[string]bool
 	WatchedDeployersSet map[string]bool
 	CommandHistory      []string
+	Stats               *stats.Stats
 }
 
 func Open(path string) (*DB, error) {
@@ -56,6 +59,10 @@ func (d *DB) InitSchema() error {
 			tags TEXT,
 			saved_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS configuration (
+			key TEXT PRIMARY KEY,
+			value TEXT
+		);`,
 	}
 
 	for _, q := range queries {
@@ -74,7 +81,7 @@ func (d *DB) SaveState(s PersistentState) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	saveJSON := func(key string, val interface{}) error {
 		b, err := json.Marshal(val)
@@ -106,6 +113,9 @@ func (d *DB) SaveState(s PersistentState) error {
 	if err := saveJSON("CommandHistory", s.CommandHistory); err != nil {
 		return err
 	}
+	if err := saveJSON("Stats", s.Stats); err != nil {
+		return err
+	}
 
 	return tx.Commit()
 }
@@ -119,12 +129,13 @@ func (d *DB) LoadState() (PersistentState, error) {
 	s.WatchlistSet = make(map[string]bool)
 	s.PinnedSet = make(map[string]bool)
 	s.WatchedDeployersSet = make(map[string]bool)
+	s.Stats = stats.New()
 
 	rows, err := d.conn.Query("SELECT key, value FROM app_state")
 	if err != nil {
 		return s, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var key, value string
@@ -146,6 +157,8 @@ func (d *DB) LoadState() (PersistentState, error) {
 			_ = json.Unmarshal([]byte(value), &s.WatchedDeployersSet)
 		case "CommandHistory":
 			_ = json.Unmarshal([]byte(value), &s.CommandHistory)
+		case "Stats":
+			_ = json.Unmarshal([]byte(value), &s.Stats)
 		}
 	}
 	return s, nil
@@ -168,13 +181,13 @@ func (d *DB) SeedFlags(descriptions map[string]string, categories map[string]str
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare("INSERT INTO flags (name, description, category) VALUES (?, ?, ?)")
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for name, desc := range descriptions {
 		cat := categories[name]
@@ -196,7 +209,7 @@ func (d *DB) GetFlags() (map[string]string, map[string]string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var name, desc, cat string
@@ -242,7 +255,7 @@ func (d *DB) ListSavedContracts() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var contracts []string
 	for rows.Next() {
@@ -289,4 +302,36 @@ func (d *DB) GetContractTags(contract string) ([]string, error) {
 	var tags []string
 	err = json.Unmarshal([]byte(tagsJSON), &tags)
 	return tags, err
+}
+
+func (d *DB) SaveConfig(cfg interface{}) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+
+	_, err = d.conn.Exec("INSERT OR REPLACE INTO configuration (key, value) VALUES (?, ?)", "main_config", string(b))
+	return err
+}
+
+func (d *DB) LoadConfig(cfg interface{}) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var value string
+	err := d.conn.QueryRow("SELECT value FROM configuration WHERE key = ?", "main_config").Scan(&value)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	if err := json.Unmarshal([]byte(value), cfg); err != nil {
+		return true, err
+	}
+	return true, nil
 }

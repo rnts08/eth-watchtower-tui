@@ -22,26 +22,32 @@ var (
 )
 
 func main() {
-	cfg := config.Load()
+	// Initialize DB first to load config
+	// Default DB path for initial load attempt
+	dbPath := "eth-watchtower.db"
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Printf("Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = database.Close() }()
+
+	if err := database.InitSchema(); err != nil {
+		fmt.Printf("Error initializing database schema: %v\n", err)
+		os.Exit(1)
+	}
+
+	cfg, configFound := config.Load(database)
 
 	logFilePath := cfg.LogFilePath
 
 	resetState := flag.Bool("reset-state", cfg.ResetState, "Reset state and read from beginning (ignore saved history position)")
-	initConfig := flag.Bool("init-config", false, "Generate a default config.json file if one doesn't exist")
 	sinceFlag := flag.String("since", "", "Filter logs since this time (duration like 1h or RFC3339 timestamp)")
 	untilFlag := flag.String("until", "", "Filter logs until this time (duration like 1h or RFC3339 timestamp)")
 	minRiskFlag := flag.Int("min-risk", cfg.MinRiskScore, "Minimum risk score to display")
 	maxRiskFlag := flag.Int("max-risk", cfg.MaxRiskScore, "Maximum risk score to display")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
-
-	if *initConfig {
-		if err := config.CreateDefault(); err != nil {
-			fmt.Printf("Error creating default config: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
 
 	if *versionFlag {
 		fmt.Printf("eth-watchtower-tui v%s\n", version)
@@ -65,19 +71,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize DB
-	database, err := db.Open(cfg.DatabasePath)
-	if err != nil {
-		fmt.Printf("Error opening database: %v\n", err)
-		os.Exit(1)
-	}
-	defer database.Close()
-
-	if err := database.InitSchema(); err != nil {
-		fmt.Printf("Error initializing database schema: %v\n", err)
-		os.Exit(1)
-	}
-
 	if err := database.SeedFlags(db.DefaultFlagDescriptions, db.DefaultFlagCategories); err != nil {
 		fmt.Printf("Error seeding flags: %v\n", err)
 	}
@@ -87,6 +80,12 @@ func main() {
 	if !*resetState {
 		savedState, _ = database.LoadState()
 		savedOffset = savedState.FileOffset
+	}
+
+	// Initialize or load stats
+	s := savedState.Stats
+	if s == nil {
+		s = stats.New()
 	}
 
 	// Handle file truncation or reset
@@ -111,9 +110,12 @@ func main() {
 	// Read recent (savedOffset to EOF) - These are "new" since last run
 	recent, offset, err := data.ReadLogEntries(logFilePath, savedOffset)
 	if err != nil {
-		fmt.Printf("Error reading log file: %v\n", err)
+		// Don't exit here, might be setting up config
 		os.Exit(1)
 	}
+
+	// Process only new entries to update stats
+	s.Process(recent)
 
 	entries := append(history, recent...)
 
@@ -168,6 +170,7 @@ func main() {
 
 	initialModel := tui.NewModel(tui.InitMsg{
 		Items:                    entries,
+		Stats:                    s,
 		FileOffset:               offset,
 		ReviewedSet:              reviewed,
 		WatchlistSet:             watchlist,
@@ -190,6 +193,7 @@ func main() {
 		LogFilePath:              logFilePath,
 		LatencyThresholds:        cfg.LatencyThresholds,
 		DB:                       database,
+		InConfigMode:             !configFound,
 	})
 
 	p := tea.NewProgram(initialModel, tea.WithAltScreen())

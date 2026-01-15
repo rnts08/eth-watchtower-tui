@@ -225,7 +225,8 @@ func (m *Model) updateSavedContractsView(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.AlertMsg = "Tags updated"
 							m.InTagInputMode = false
 							m.TagInput.Blur()
-							return m, tea.Batch(m.executeCommand("view_saved_contracts"), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return ClearAlertMsg{} }))
+							_, cmd := m.executeCommand("view_saved_contracts")
+							return m, tea.Batch(cmd, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return ClearAlertMsg{} }))
 						}
 					}
 				}
@@ -495,6 +496,7 @@ func (m *Model) saveAppState() error {
 		PinnedSet:           m.PinnedSet,
 		WatchedDeployersSet: m.WatchedDeployersSet,
 		CommandHistory:      m.CommandHistory,
+		Stats:               m.Stats,
 	}
 	return m.DB.SaveState(state)
 }

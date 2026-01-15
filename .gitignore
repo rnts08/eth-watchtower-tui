@@ -9,14 +9,7 @@ _attic/
 *.log
 
 # Application State
-eth-watchtower.state
-eth-watchtower.reviewed
-eth-watchtower.watchlist
-eth-watchtower.pinned
-eth-watchtower.watched_deployers
-eth-watchtower.command_history
-eth-watchtower.bin*
-eth-watchtower.state.*
+eth-watchtower.db
 
 # Random files
 .vscode

@@ -43,7 +43,7 @@ func TestConfig_LoadAndCreate(t *testing.T) {
 	}
 
 	// Test Load
-	cfg := Load()
+	cfg, _ := Load(nil)
 	if cfg.LogFilePath != "eth-watchtower.jsonl" {
 		t.Errorf("Expected default LogFilePath, got %s", cfg.LogFilePath)
 	}
