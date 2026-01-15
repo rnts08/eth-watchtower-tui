@@ -1,11 +1,12 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"eth-watchtower-tui/data"
+	"eth-watchtower-tui/db"
 	"eth-watchtower-tui/stats"
 	"eth-watchtower-tui/util"
 
@@ -194,6 +195,82 @@ func (m *Model) updateTimelineView(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	m.TimelineList, cmd = m.TimelineList.Update(msg)
 	return m, cmd
+}
+
+func (m *Model) updateSavedContractsView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, AppKeys.Quit) && !m.SavedContractsList.SettingFilter() {
+			if m.InTagInputMode {
+				m.InTagInputMode = false
+				m.TagInput.Blur()
+				return m, nil
+			}
+			m.ShowingSavedContracts = false
+			return m, nil
+		}
+		if m.InTagInputMode {
+			if msg.String() == "enter" {
+				if selected, ok := m.SavedContractsList.SelectedItem().(savedContractItem); ok {
+					tagsStr := m.TagInput.Value()
+					tags := strings.Split(tagsStr, ",")
+					for i := range tags {
+						tags[i] = strings.TrimSpace(tags[i])
+					}
+					if m.DB != nil {
+						if err := m.DB.UpdateContractTags(selected.contract, tags); err != nil {
+							m.AlertMsg = fmt.Sprintf("Error updating tags: %v", err)
+						} else {
+							m.AlertMsg = "Tags updated"
+							m.InTagInputMode = false
+							m.TagInput.Blur()
+							return m, tea.Batch(m.executeCommand("view_saved_contracts"), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return ClearAlertMsg{} }))
+						}
+					}
+				}
+			}
+			m.TagInput, cmd = m.TagInput.Update(msg)
+			return m, cmd
+		}
+		if key.Matches(msg, AppKeys.DeleteSavedContract) {
+			return m.executeCommand("delete_saved_contract")
+		}
+		if key.Matches(msg, AppKeys.TagContract) {
+			return m.executeCommand("tag_contract")
+		}
+		if msg.String() == "enter" {
+			if selected, ok := m.SavedContractsList.SelectedItem().(savedContractItem); ok {
+				// Load saved contract data
+				if m.DB != nil {
+					dataJSON, err := m.DB.GetSavedContract(selected.contract)
+					if err == nil {
+						var savedData BlockchainData
+						if json.Unmarshal([]byte(dataJSON), &savedData) == nil {
+							m.ComparisonData = &savedData
+							m.ShowingSavedContracts = false
+							m.ShowingComparison = true
+							return m, nil
+						}
+					}
+				}
+			}
+		}
+	}
+	m.SavedContractsList, cmd = m.SavedContractsList.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) updateComparisonView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, AppKeys.Quit) {
+			m.ShowingComparison = false
+			m.ComparisonData = nil
+			return m, nil
+		}
+	}
+	return m, nil
 }
 
 func (m *Model) updateABIView(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -407,10 +484,10 @@ func (m *Model) updateListItems() tea.Cmd {
 }
 
 func (m *Model) saveAppState() error {
-	if m.StateFilePath == "" {
+	if m.DB == nil {
 		return nil
 	}
-	state := data.PersistentState{
+	state := db.PersistentState{
 		FileOffset:          m.FileOffset,
 		SidePaneWidth:       m.SidePaneWidth,
 		ReviewedSet:         m.ReviewedSet,
@@ -419,7 +496,7 @@ func (m *Model) saveAppState() error {
 		WatchedDeployersSet: m.WatchedDeployersSet,
 		CommandHistory:      m.CommandHistory,
 	}
-	return data.SaveState(m.StateFilePath, state)
+	return m.DB.SaveState(state)
 }
 
 func updateListModel(l list.Model, msg tea.Msg) (list.Model, tea.Cmd) {

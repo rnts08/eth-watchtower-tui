@@ -2,6 +2,7 @@
 eth-watchtower-tui
 dist/
 builds/
+_attic/
 
 # Logs and Data
 *.jsonl
@@ -16,3 +17,7 @@ eth-watchtower.watched_deployers
 eth-watchtower.command_history
 eth-watchtower.bin*
 eth-watchtower.state.*
+
+# Random files
+.vscode
+TODO.*

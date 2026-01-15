@@ -12,7 +12,7 @@ const defaultSidePaneWidth = 30
 
 type Config struct {
 	LogFilePath          string     `json:"logFilePath"`
-	StateFilePath        string     `json:"stateFilePath"`
+	DatabasePath         string     `json:"databasePath"`
 	ResetState           bool       `json:"resetState"`
 	MinRiskScore         int        `json:"minRiskScore"`
 	MaxRiskScore         int        `json:"maxRiskScore"`
@@ -43,7 +43,7 @@ type LatencyThresholds struct {
 func Load() Config {
 	c := Config{
 		LogFilePath:          "eth-watchtower.jsonl",
-		StateFilePath:        "eth-watchtower.bin",
+		DatabasePath:         "eth-watchtower.db",
 		ResetState:           false,
 		MinRiskScore:         10,
 		MaxRiskScore:         300,
@@ -76,7 +76,7 @@ func Load() Config {
 func CreateDefault() error {
 	c := Config{
 		LogFilePath:          "eth-watchtower.jsonl",
-		StateFilePath:        "eth-watchtower.bin",
+		DatabasePath:         "eth-watchtower.db",
 		ResetState:           false,
 		MinRiskScore:         10,
 		MaxRiskScore:         300,

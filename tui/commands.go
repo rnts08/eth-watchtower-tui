@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"eth-watchtower-tui/util"
@@ -65,6 +66,11 @@ var commandHandlers = map[string]commandHandler{
 	"view_abi":                handleViewABI,
 	"toggle_flag_info":        handleToggleFlagInfo,
 	"sidebar_focus":           handleSidebarFocus,
+	"save_contract_details":   handleSaveContractDetails,
+	"view_saved_contracts":    handleViewSavedContracts,
+	"compare_contract":        handleCompareContract,
+	"delete_saved_contract":   handleDeleteSavedContract,
+	"tag_contract":            handleTagContract,
 }
 
 func handlePause(m *Model) (tea.Model, tea.Cmd) {
@@ -72,6 +78,72 @@ func handlePause(m *Model) (tea.Model, tea.Cmd) {
 	if !m.Paused {
 		m.AlertMsg = ""
 		return m, m.updateListItems()
+	}
+	return m, nil
+}
+
+func handleTagContract(m *Model) (tea.Model, tea.Cmd) {
+	if m.ShowingSavedContracts {
+		if selected, ok := m.SavedContractsList.SelectedItem().(savedContractItem); ok {
+			m.InTagInputMode = true
+			m.TagInput.Focus()
+			m.TagInput.SetValue(strings.Join(selected.tags, ", "))
+			m.TagInput.Placeholder = "Enter tags separated by comma..."
+			// We store the contract being tagged temporarily, maybe in AlertMsg or a dedicated field if needed,
+			// but since it's the selected item in the list, we can retrieve it again in Update.
+		}
+	}
+	return m, nil
+}
+
+func handleDeleteSavedContract(m *Model) (tea.Model, tea.Cmd) {
+	if m.ShowingSavedContracts {
+		if selected, ok := m.SavedContractsList.SelectedItem().(savedContractItem); ok {
+			m.ConfirmingDelete = true
+			m.AlertMsg = fmt.Sprintf("Delete %s?", selected.contract)
+		}
+	}
+	return m, nil
+}
+
+func handleViewSavedContracts(m *Model) (tea.Model, tea.Cmd) {
+	if m.DB != nil {
+		contracts, err := m.DB.ListSavedContracts()
+		if err != nil {
+			m.AlertMsg = fmt.Sprintf("Error listing saved contracts: %v", err)
+			return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return ClearAlertMsg{} })
+		}
+		m.openSavedContractsView(contracts)
+	}
+	return m, nil
+}
+
+func handleCompareContract(m *Model) (tea.Model, tea.Cmd) {
+	if m.ShowingDetail && m.DetailData != nil {
+		// If we are in detail view, try to compare with a saved version of the SAME contract if it exists
+		if m.DB != nil {
+			savedDataJSON, err := m.DB.GetSavedContract(m.DetailData.Contract)
+			if err == nil && savedDataJSON != "" {
+				// Found a saved version, load it and show comparison
+				var savedData BlockchainData
+				// We need to unmarshal. Since we don't have json import here, we'll delegate to a method on Model or just do it if we add import.
+				// For simplicity, let's assume we can trigger a command that does the heavy lifting or just open the saved contracts list to pick one.
+				// Actually, a better UX might be: Press '=' -> Open list of saved contracts -> Pick one -> Show Diff.
+				// But if we want to diff against ITSELF (previous state), we check that first.
+				
+				// Let's go with: Open saved contracts list to select comparison target.
+				contracts, err := m.DB.ListSavedContracts()
+				if err != nil {
+					m.AlertMsg = fmt.Sprintf("Error listing saved contracts: %v", err)
+					return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return ClearAlertMsg{} })
+				}
+				m.openSavedContractsView(contracts)
+				m.ComparisonSource = m.DetailData.Contract // Mark that we want to compare against this
+			} else {
+				// No saved version of this contract, open list to pick any other
+				return handleViewSavedContracts(m)
+			}
+		}
 	}
 	return m, nil
 }
@@ -129,6 +201,21 @@ func handleToggleFlagInfo(m *Model) (tea.Model, tea.Cmd) {
 
 func handleSidebarFocus(m *Model) (tea.Model, tea.Cmd) {
 	m.SidebarActive = !m.SidebarActive
+	return m, nil
+}
+
+func handleSaveContractDetails(m *Model) (tea.Model, tea.Cmd) {
+	if m.ShowingDetail && m.DetailData != nil {
+		if m.DB != nil {
+			err := m.DB.SaveContract(m.DetailData.Contract, m.DetailData)
+			if err != nil {
+				m.AlertMsg = fmt.Sprintf("Error saving contract: %v", err)
+			} else {
+				m.AlertMsg = fmt.Sprintf("Saved contract %s", m.DetailData.Contract)
+			}
+			return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return ClearAlertMsg{} })
+		}
+	}
 	return m, nil
 }
 

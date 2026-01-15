@@ -37,6 +37,7 @@ const (
 	PromptQuit    = "Are you sure you want to quit?"
 	PromptMarkAll = "Mark all currently filtered events as reviewed?"
 	PromptReview  = "Mark this event as reviewed?"
+	PromptDelete  = "Are you sure you want to delete this saved contract?"
 	PromptConfirm = "(y) Yes    (n) No"
 
 	// Help Text

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"eth-watchtower-tui/config"
+	"eth-watchtower-tui/db"
 	"eth-watchtower-tui/stats"
 	"eth-watchtower-tui/util"
 
@@ -41,6 +42,12 @@ type timelineItem struct {
 	stats.LogEntry
 }
 
+// savedContractItem implements list.Item for the saved contracts list.
+type savedContractItem struct {
+	contract string
+	tags     []string
+}
+
 type CommandItem struct {
 	Title string
 	Desc  string
@@ -70,6 +77,7 @@ type BlockchainData struct {
 	TokenMarketCap string
 	TokenVolume24h string
 	Sender       string
+	Tags         []string
 }
 
 type Model struct {
@@ -96,6 +104,7 @@ type Model struct {
 	ShowReviewed        bool
 	ConfirmingMarkAll   bool
 	ConfirmingQuit      bool
+	ConfirmingDelete    bool
 	ShowingHelp         bool
 	ShowingStats        bool
 	HighRiskBanner      string
@@ -158,10 +167,17 @@ type Model struct {
 	InTimeFilterMode    bool
 	TimeFilterType      string // "since" or "until"
 	LogFilePath         string
-	StateFilePath       string
+	InTagInputMode      bool
+	TagInput            textinput.Model
 	SidebarActive       bool
 	SidebarSelection    int
 	LatencyThresholds   config.LatencyThresholds
+	DB                  *db.DB
+	ShowingSavedContracts bool
+	SavedContractsList    list.Model
+	ShowingComparison     bool
+	ComparisonData        *BlockchainData
+	ComparisonSource      string // "Saved" or contract address
 }
 
 type InitMsg struct {
@@ -187,8 +203,8 @@ type InitMsg struct {
 	LatestHighRiskEntry *stats.LogEntry
 	HighRiskBanner      string
 	LogFilePath         string
-	StateFilePath       string
 	LatencyThresholds   config.LatencyThresholds
+	DB                  *db.DB
 }
 
 type ClearAlertMsg struct{}
@@ -212,4 +228,23 @@ type VerificationStatusMsg struct {
 	Status   string
 	Error    error
 	ABI      string
+}
+
+func (i savedContractItem) Title() string {
+	return i.contract
+}
+
+func (i savedContractItem) Description() string {
+	if len(i.tags) > 0 {
+		return "Tags: " + util.JoinTags(i.tags)
+	}
+	return "Saved contract details"
+}
+
+func (i savedContractItem) FilterValue() string {
+	val := i.contract
+	if len(i.tags) > 0 {
+		val += " " + util.JoinTags(i.tags)
+	}
+	return val
 }

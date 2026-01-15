@@ -9,6 +9,7 @@ import (
 
 	"eth-watchtower-tui/config"
 	"eth-watchtower-tui/data"
+	"eth-watchtower-tui/db"
 	"eth-watchtower-tui/stats"
 	"eth-watchtower-tui/tui"
 	"eth-watchtower-tui/util"
@@ -64,10 +65,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	var savedState data.PersistentState
+	// Initialize DB
+	database, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		fmt.Printf("Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	if err := database.InitSchema(); err != nil {
+		fmt.Printf("Error initializing database schema: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := database.SeedFlags(db.DefaultFlagDescriptions, db.DefaultFlagCategories); err != nil {
+		fmt.Printf("Error seeding flags: %v\n", err)
+	}
+
+	var savedState db.PersistentState
 	var savedOffset int64
 	if !*resetState {
-		savedState, _ = data.LoadState(cfg.StateFilePath)
+		savedState, _ = database.LoadState()
 		savedOffset = savedState.FileOffset
 	}
 
@@ -122,6 +140,13 @@ func main() {
 	}
 	commandHistory := savedState.CommandHistory
 
+	// Load flags into TUI
+	descriptions, categories, err := database.GetFlags()
+	if err == nil {
+		tui.FlagDescriptions = descriptions
+		tui.FlagCategories = categories
+	}
+
 	// Initial sort
 	util.SortEntries(entries, util.SortRiskDesc, pinned)
 
@@ -142,29 +167,29 @@ func main() {
 	}
 
 	initialModel := tui.NewModel(tui.InitMsg{
-		Items:               entries,
-		FileOffset:          offset,
-		ReviewedSet:         reviewed,
-		WatchlistSet:        watchlist,
-		PinnedSet:           pinned,
-		WatchedDeployersSet: watchedDeployers,
-		FilterSince:         filterSince,
-		FilterUntil:         filterUntil,
-		MaxRiskScore:        *maxRiskFlag,
-		MinRiskScore:        *minRiskFlag,
-		CommandHistory:      commandHistory,
-		RpcUrls:             cfg.RpcUrls,
-		EtherscanApiKey:     cfg.EtherscanApiKey,
-		ExplorerApiUrl:      cfg.ExplorerApiUrl,
+		Items:                    entries,
+		FileOffset:               offset,
+		ReviewedSet:              reviewed,
+		WatchlistSet:             watchlist,
+		PinnedSet:                pinned,
+		WatchedDeployersSet:      watchedDeployers,
+		FilterSince:              filterSince,
+		FilterUntil:              filterUntil,
+		MaxRiskScore:             *maxRiskFlag,
+		MinRiskScore:             *minRiskFlag,
+		CommandHistory:           commandHistory,
+		RpcUrls:                  cfg.RpcUrls,
+		EtherscanApiKey:          cfg.EtherscanApiKey,
+		ExplorerApiUrl:           cfg.ExplorerApiUrl,
 		ExplorerVerificationPath: cfg.ExplorerVerificationPath,
-		CoinmarketcapApiKey: cfg.CoinmarketcapApiKey,
-		SidePaneWidth:       initialSidePaneWidth,
-		AutoVerifyContracts: cfg.AutoVerifyContracts,
-		LatestHighRiskEntry: latestHighRiskEntry,
-		HighRiskBanner:      highRiskBanner,
-		LogFilePath:         logFilePath,
-		StateFilePath:       cfg.StateFilePath,
-		LatencyThresholds:   cfg.LatencyThresholds,
+		CoinmarketcapApiKey:      cfg.CoinmarketcapApiKey,
+		SidePaneWidth:            initialSidePaneWidth,
+		AutoVerifyContracts:      cfg.AutoVerifyContracts,
+		LatestHighRiskEntry:      latestHighRiskEntry,
+		HighRiskBanner:           highRiskBanner,
+		LogFilePath:              logFilePath,
+		LatencyThresholds:        cfg.LatencyThresholds,
+		DB:                       database,
 	})
 
 	p := tea.NewProgram(initialModel, tea.WithAltScreen())

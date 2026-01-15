@@ -56,6 +56,10 @@ type KeyMap struct {
 	ClearTokenTypeFilter key.Binding
 	Quit                 key.Binding
 	SidebarFocus         key.Binding
+	ViewSavedContracts   key.Binding
+	CompareContract      key.Binding
+	DeleteSavedContract  key.Binding
+	TagContract          key.Binding
 }
 
 // AppKeys defines the keybindings for the application.
@@ -169,6 +173,10 @@ var AppKeys = KeyMap{
 	FilterTokenType:  key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "filter token type")),
 	ClearTokenTypeFilter: key.NewBinding(key.WithKeys("E"), key.WithHelp("E", "clear token type")),
 	SidebarFocus:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "focus sidebar")),
+	ViewSavedContracts: key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "view saved contracts")),
+	CompareContract:    key.NewBinding(key.WithKeys("="), key.WithHelp("=", "compare with saved")),
+	DeleteSavedContract: key.NewBinding(key.WithKeys("x", "delete"), key.WithHelp("x", "delete saved")),
+	TagContract:         key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tag contract")),
 	Quit: key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q", "quit")),
 }
 
@@ -224,4 +232,9 @@ var availableCommands = []CommandItem{
 	{"View Contract ABI", "View the contract ABI if verified", "view_abi"},
 	{"Toggle Flag Info", "Toggle flag description in details", "toggle_flag_info"},
 	{"Focus Sidebar", "Toggle focus on the sidebar", "sidebar_focus"},
+	{"Save Contract Details", "Save current contract details to DB", "save_contract_details"},
+	{"View Saved Contracts", "List saved contracts from DB", "view_saved_contracts"},
+	{"Compare Contract", "Compare current contract with a saved one", "compare_contract"},
+	{"Delete Saved Contract", "Delete selected saved contract", "delete_saved_contract"},
+	{"Tag Contract", "Add/Edit tags for saved contract", "tag_contract"},
 }

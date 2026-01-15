@@ -25,184 +25,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var flagDescriptions = map[string]string{
-	"AntiContractCheck":           "The contract tries to block other contracts from interacting (e.g., checking tx.origin).",
-	"ApprovalDetected":            "A token approval event was emitted, allowing a spender to transfer tokens on your behalf.",
-	"ArbitraryJump":               "Jumps are performed to destinations derived from calldata, a critical control flow vulnerability.",
-	"ArbitraryStorageWrite":       "Storage slots are written to using a key derived from calldata, allowing potential overwriting of arbitrary storage.",
-	"AssemblyErrorProne":          "Inline assembly usage includes patterns prone to errors, such as incorrect storage/memory pointer handling.",
-	"BadRandomness":               "Uses weak randomness like block variables for “random” numbers.",
-	"Blacklist":                   "Includes logic to block specific addresses from transfers/interactions.",
-	"BlockNumberCheck":            "Behavior depends on the current block number.",
-	"BlockStuffing":               "Behavioral dependence that could be affected by transaction packing.",
-	"Burnable":                    "Tokens or balances can be destroyed permanently.",
-	"CallInLoop":                  "External calls are made inside loops (gas & reentrancy risk).",
-	"CalldataSizeCheck":           "Validates the calldata length manually.",
-	"Centralized":                 "Contract has a single owner with powerful privileges.",
-	"ChainIDCheck":                "Behavior depends on the blockchain network ID.",
-	"CheckOwnBalance":             "Reads the contract’s own balance in logic.",
-	"CodeHashCheck":               "Inspects contract bytecode hashes (anti-bot / whitelisting behavior).",
-	"CoinbaseCheck":               "Depends on the block miner address (gamable randomness).",
-	"ContractFactory":             "Deploys other contracts.",
-	"CostlyLoop":                  "Loops scale with user or storage size (gas risk).",
-	"DeadCode":                    "The contract contains code that is unreachable.",
-	"DelegateCall":                "Uses delegatecall (executes foreign code in current storage).",
-	"DelegateCallInLoop":          "Delegate calls inside a loop (double danger).",
-	"DelegateCallToZero":          "Delegate calls to the zero address (almost always unintended).",
-	"DivideBeforeMultiply":        "Division done before multiplication (precision loss risk).",
-	"DoSGasLimit":                 "Loops are bounded by dynamic data, creating a Denial of Service vector via block gas limits.",
-	"ERC20":                       "Contract conforms to the ERC20 token standard.",
-	"ERC721":                      "Contract conforms to the ERC721 non-fungible token (NFT) standard.",
-	"ERC777Reentrancy":            "Pattern vulnerable to ERC-777 callback reentrancy.",
-	"FactoryInLoop":               "Deploys contracts inside loops.",
-	"FakeHighBalance":             "The `balanceOf` function returns hardcoded large values to simulate wealth.",
-	"FakeRenounce":                "Ownership renouncement sets the owner to a non-zero address that looks like zero, retaining control.",
-	"FakeToken":                   "The contract mimics ERC20 signatures but lacks actual storage logic, likely a scam.",
-	"FakeTransferEvent":           "`Transfer` events are emitted without updating actual storage balances.",
-	"FeeOnTransfer":               "The token has hardcoded fees on transfers, which may not be visible in standard interfaces.",
-	"FlashLoan":                   "Signs that flash-loan based behavior exists.",
-	"FreshDeployer":               "The deployer address is very new.",
-	"FrontrunnableByTime":         "Logic depends on timestamps, enabling front-running.",
-	"FrontRunning":                "Transaction order dependency patterns exist, such as hash solution verification, which are vulnerable to front-running.",
-	"GasDependentLoop":            "Loop conditions depend on remaining gas, which can lead to unpredictable behavior.",
-	"GasGriefingLoop":             "Loops are designed specifically to consume gas, likely to grief users or block operations.",
-	"GasInLoop":                   "The `GAS` opcode is used inside a loop, often a sign of gas-dependent logic.",
-	"GasLimitCheck":               "Behavior depends on gas constraints.",
-	"GasPriceCheck":               "Logic is conditional on `tx.gasprice`, often used in front-running or griefing.",
-	"GasTokenMinting":             "Patterns associated with minting gas tokens via `SELFDESTRUCT` refunds are present.",
-	"GasUsage":                    "Performs heavy computation, causing high gas costs.",
-	"GovernanceToken":             "Token has voting / governance semantics.",
-	"HardcodedGasLimit":           "External calls use hardcoded gas limits, which may cause transactions to fail if gas costs change.",
-	"HardcodedSelfDestruct":       "Self-destruct sends funds to a hardcoded address.",
-	"HasAdminRole":                "Central admin role exists.",
-	"HasFee":                      "Transfers incur fees.",
-	"HasWhitelist":                "Only allowed addresses can interact.",
-	"HiddenFee":                   "Transfers reduce the amount by a constant value, representing a hidden fee.",
-	"HiddenMint":                  "Storage writes occur without corresponding Transfer events, hiding the creation of tokens.",
-	"HiddenOwner":                 "Contract may have a hidden owner or privileged address.",
-	"HighFees":                    "Transfer or interaction fees are unusually high.",
-	"HighGas":                     "Transaction used an unusually high amount of gas.",
-	"Honeypot":                    "This contract may be a honeypot, where funds can be sent in but not out.",
-	"IncorrectConstructor":        "A public function is named `constructor`, which is not a constructor in older Solidity versions.",
-	"IncorrectInterface":          "The contract claims to support an interface (ERC165) but is missing required functions.",
-	"InfiniteAllowances":          "Approvals tend toward unbounded allowance patterns.",
-	"InfiniteApproval":            "An approval for unlimited tokens was detected. This is high risk if the spender is malicious.",
-	"InfiniteLoop":                "The contract contains loops that may not terminate.",
-	"InitializeFunction":          "Explicit initializer present (proxy-style).",
-	"IntegerTruncation":           "Calldata inputs are masked in a way that could lead to integer truncation and logic errors.",
-	"InterfaceCheck":              "Verifies whether another contract supports a specific interface.",
-	"LargeApproval":               "Detects unusually large token approvals.",
-	"LiquidityCreated":            "Liquidity pool has been created involving the token.",
-	"LockedEther":                 "The contract can receive Ether but has no mechanism to withdraw it, effectively locking funds.",
-	"LockedOwnership":             "Ownership locked or renounced.",
-	"LoopDetected":                "Control flow loops are present in the contract.",
-	"LowLevelCall":                "Uses raw .call() instead of typed functions.",
-	"LowLevelSend":                "Uses .send() which only forwards limited gas.",
-	"LowLevelTransfer":            "Uses .transfer(), also gas-limited.",
-	"MaliciousProxy":              "The contract uses an implementation address known to be malicious.",
-	"MathOverflow":                "Possible unchecked arithmetic overflow conditions.",
-	"Metamorphic":                 "The contract uses metamorphic creation patterns (CREATE2) to change code at the same address.",
-	"MetamorphicExploit":          "A metamorphic contract contains self-destruct logic, a common vector for exploits.",
-	"MintDetected":                "Tokens were minted (created). This can dilute supply or be part of a rug pull mechanism.",
-	"Mintable":                    "Tokens or balances can be created.",
-	"Minting":                     "The contract has minting capabilities, allowing the creation of new tokens.",
-	"MintToDeployer":              "Tokens were minted directly to the deployer.",
-	"MisleadingFunctionName":      "Functions use common names (e.g., `transfer`) but have non-standard selectors, potentially to deceive.",
-	"MissingZeroCheck":            "Transfer functions lack validation for the zero address, risking accidental token burns.",
-	"ModifiedBalance":             "The `balanceOf` function returns a modified value (e.g., arithmetic on storage), misrepresenting balances.",
-	"MultipleMints":               "Minting occurred multiple times.",
-	"Multisig":                    "Uses multi-signature authorization.",
-	"NewContract":                 "Contract was recently deployed.",
-	"NonStandardERC20":            "ERC-20 compatibility quirks detected.",
-	"NonStandardProxy":            "The proxy implementation does not follow the EIP-1967 standard.",
-	"NotUpgradeable":              "Appears to be a fixed/immutable contract.",
-	"OnchainOracle":               "Uses on-chain price or data oracles.",
-	"OpenZeppelin":                "Built on OpenZeppelin contracts.",
-	"OracleManipulationRisk":      "Oracle-dependent logic that might be gamed.",
-	"Ownable":                     "Has a single owner role.",
-	"OwnerTransferCheck":          "Transfer functions are restricted to the owner, preventing others from moving tokens.",
-	"Pausable":                    "Contract can be paused.",
-	"PermitFunction":              "EIP-2612–style permit signatures supported.",
-	"PhantomFunction":             "Functions exist that do nothing but trap funds or mislead users.",
-	"PrivilegedSelfDestruct":      "Self-destruct functionality is present but protected by access control.",
-	"Proxy":                       "This is a proxy contract, which delegates calls to another implementation contract. The logic may be upgradeable.",
-	"ProxyContract":               "Contract delegates storage/logic separation (upgradeable).",
-	"ProxyDestruction":            "The proxy contract itself contains a self-destruct mechanism.",
-	"ProxySelectorClash":          "Potential selector clashes exist between the proxy and its implementation functions.",
-	"PublicBurn":                  "A `burn` function is unprotected and can be called by anyone to destroy tokens.",
-	"Randomness":                  "Any randomness-related logic present.",
-	"ReadOnlyReentrancy":          "An external call is followed by a state read, which may expose the contract to read-only reentrancy risks.",
-	"ReentrancyGuard":             "The contract uses reentrancy guard patterns (SLOAD/SSTORE checks) to prevent reentrancy attacks.",
-	"ReentrancyRisk":              "External calls could re-enter functions.",
-	"ReflectToken":                "“Reflection-style” tokenomics (redistributes fees).",
-	"ReinitializableProxy":        "The proxy's `initialize` function can be called multiple times, allowing re-initialization of the contract.",
-	"RenounceOwnership":           "Ownership can be or has been relinquished.",
-	"ReturnBomb":                  "The contract always reverts or has no success path, designed to trap funds or waste gas.",
-	"RewardToken":                 "Rewards or yield accrual built-in.",
-	"SelfDestruct":                "Contract can destroy itself.",
-	"SelfDestructInLoop":          "Self-destruct operations are reachable from within a loop.",
-	"ShadowingState":              "State reads are immediately discarded, suggesting confusion between storage and local variables (shadowing).",
-	"SignatureMalleability":       "Usage of `ecrecover` without strict s-value checks allows malleable signatures (EIP-2 violation).",
-	"SignatureReplay":             "Signatures are used without nonces, making them susceptible to replay attacks.",
-	"Stakable":                    "Users can stake tokens.",
-	"StandardERC20":               "Appears to correctly implement ERC-20.",
-	"Stateless":                   "Contract stores little or no persistent data.",
-	"StrawManContract":            "The contract appears to be a 'cash out' opportunity but contains hidden traps (reverts, delegatecalls).",
-	"StrictBalanceEquality":       "Strict equality checks on contract balance are used, which can be easily manipulated to block contract logic.",
-	"Suspicious":                  "General suspicious activity detected.",
-	"SuspiciousCall":              "External calls look risky or unexpected.",
-	"SuspiciousCodeSize":          "Code size triggers special logic (bot/contract detection).",
-	"SuspiciousDelegate":          "Delegatecalls are made to hardcoded addresses that may be malicious or hidden.",
-	"SuspiciousStateChange":       "State variables are written to but never read, indicating useless or deceptive logic.",
-	"TaxToken":                    "Transfer logic includes division, indicating the presence of fees or taxes on transfers.",
-	"TimeLock":                    "Actions delayed by a set time period.",
-	"Timestamp":                   "Logic depends on block timestamp (slightly manipulable).",
-	"TimestampCheck":              "Behavior depends on block timestamps.",
-	"TimestampDependence":         "Logic is conditional on `block.timestamp`, which is susceptible to miner manipulation.",
-	"TokenDraining":               "Token transfer functions allow the token address to be user-controlled, enabling potential draining of arbitrary tokens.",
-	"TradingCooldown":             "Transfers are restricted by a time-lock or cooldown mechanism.",
-	"TransferLimits":              "Caps or throttles token transfers.",
-	"TxOrigin":                    "Uses tx.origin for authorization (unsafe).",
-	"UncheckedCall":               "Does not verify whether external calls succeed.",
-	"UncheckedEcrecover":          "The return value of `ecrecover` is not checked against zero, which can lead to signature validation bypasses.",
-	"UncheckedMath":               "Arithmetic operations lack overflow checks (unsafe in pre-0.8.0 Solidity without SafeMath).",
-	"UncheckedReturnData":         "The size of the return data from an external call is not verified, potentially leading to unexpected behavior.",
-	"UncheckedTransfer":           "The return value of an ERC20 transfer is ignored, so failed transfers might not be detected.",
-	"UninitializedConstructor":    "Owner-setting logic appears to be re-callable, allowing anyone to take ownership.",
-	"UninitializedLocalVariables": "Memory variables are used before being initialized, often resulting in storage pointer bugs.",
-	"UninitializedPointer":        "Writes to storage slot 0 occur via uninitialized pointers, which can corrupt critical contract state.",
-	"UnprotectedSelfDestruct":     "The `selfdestruct` opcode can be triggered by anyone, destroying the contract.",
-	"UnprotectedUpgrade":          "The proxy's `upgradeTo` function lacks access control, allowing anyone to change the implementation.",
-	"UnprotectedWithdrawal":       "Ether withdrawals appear to lack ownership checks, potentially allowing unauthorized users to drain funds.",
-	"UnrestrictedDelegateCall":    "Delegatecalls are made to addresses that are not validated, allowing arbitrary code execution.",
-	"UnsafeDelegateCall":          "Delegatecalls are made to user-supplied addresses, allowing arbitrary code execution.",
-	"UnusedEvent":                 "Events are declared but never emitted, which might indicate missing logging logic.",
-	"UnusedReturnValue":           "The return value of an external call is ignored (POP), which might hide errors or failed operations.",
-	"Unverified":                  "The contract source code is not verified on Etherscan.",
-	"Upgradable":                  "Designed to change implementation over time.",
-	"WeakRandomness":              "Block variables (timestamp, difficulty) are used for randomness, which miners can manipulate.",
-	"WhaleTransfer":               "Very large token transfers detected.",
-	"Whitelist":                   "Explicitly supports whitelisting addresses.",
-	"Withdrawal":                  "Handles withdrawal of funds from the contract.",
-	"WriteToSlotZero":             "Writes occur to storage slot 0, which is often used for ownership or proxy implementation addresses.",
-}
-
-var flagCategories = map[string]string{
-	// Security
-	"ReentrancyGuard": "Security", "ReadOnlyReentrancy": "Security", "UnprotectedWithdrawal": "Security", "ArbitraryStorageWrite": "Security", "UninitializedPointer": "Security", "UncheckedEcrecover": "Security", "WriteToSlotZero": "Security", "SignatureReplay": "Security", "TokenDraining": "Security", "ArbitraryJump": "Security", "DelegateCallToZero": "Security", "ERC777Reentrancy": "Security", "FrontRunning": "Security", "SignatureMalleability": "Security", "WeakRandomness": "Security", "LockedEther": "Security", "UninitializedConstructor": "Security", "PublicBurn": "Security", "UnprotectedUpgrade": "Security", "AssemblyErrorProne": "Security", "ReinitializableProxy": "Security", "UnrestrictedDelegateCall": "Security", "UnprotectedSelfDestruct": "Security", "UnsafeDelegateCall": "Security", "SuspiciousDelegate": "Security", "PrivilegedSelfDestruct": "Security", "HardcodedSelfDestruct": "Security", "CheckOwnBalance": "Security", "AntiContractCheck": "Security", "BadRandomness": "Security", "CalldataSizeCheck": "Security", "CodeHashCheck": "Security", "CoinbaseCheck": "Security", "TimestampDependence": "Security", "ChainIDCheck": "Security", "SuspiciousCodeSize": "Security", "ReentrancyRisk": "Security", "MathOverflow": "Security", "LowLevelCall": "Security", "LowLevelSend": "Security", "LowLevelTransfer": "Security", "OracleManipulationRisk": "Security", "FlashLoan": "Security", "TxOrigin": "Security",
-
-	// Scam
-	"FakeToken": "Scam", "TaxToken": "Scam", "FeeOnTransfer": "Scam", "HiddenMint": "Scam", "FakeRenounce": "Scam", "Blacklist": "Scam", "StrawManContract": "Scam", "ReturnBomb": "Scam", "MaliciousProxy": "Scam", "HiddenFee": "Scam", "FakeHighBalance": "Scam", "ModifiedBalance": "Scam", "FakeTransferEvent": "Scam", "PhantomFunction": "Scam", "SuspiciousStateChange": "Scam", "MisleadingFunctionName": "Scam",
-
-	// Gas
-	"HardcodedGasLimit": "Gas", "GasTokenMinting": "Gas", "CostlyLoop": "Gas", "GasGriefingLoop": "Gas", "BlockStuffing": "Gas", "LoopDetected": "Gas", "InfiniteLoop": "Gas", "GasInLoop": "Gas", "CallInLoop": "Gas", "DelegateCallInLoop": "Gas", "FactoryInLoop": "Gas", "SelfDestructInLoop": "Gas", "GasDependentLoop": "Gas", "DoSGasLimit": "Gas", "GasLimitCheck": "Gas", "GasUsage": "Gas",
-
-	// Logic
-	"UnusedReturnValue": "Logic", "UncheckedReturnData": "Logic", "StrictBalanceEquality": "Logic", "DivideBeforeMultiply": "Logic", "MissingZeroCheck": "Logic", "UncheckedTransfer": "Logic", "UncheckedMath": "Logic", "IncorrectInterface": "Logic", "ShadowingState": "Logic", "IntegerTruncation": "Logic", "UninitializedLocalVariables": "Logic", "IncorrectConstructor": "Logic", "UnusedEvent": "Logic", "DeadCode": "Logic", "GasPriceCheck": "Logic", "BlockNumberCheck": "Logic", "TimestampCheck": "Logic", "UncheckedCall": "Logic",
-
-	// Info
-	"ApprovalDetected": "Info", "InfiniteApproval": "Info", "MintDetected": "Info", "Minting": "Info", "Mintable": "Info", "Burnable": "Info", "Pausable": "Info", "Ownable": "Info", "HasAdminRole": "Info", "HasWhitelist": "Info", "Multisig": "Info", "TimeLock": "Info", "TradingCooldown": "Info", "TransferLimits": "Info", "GovernanceToken": "Info", "HasFee": "Info", "HighFees": "Info", "InfiniteAllowances": "Info", "InitializeFunction": "Info", "LockedOwnership": "Info", "NonStandardERC20": "Info", "NotUpgradeable": "Info", "OnchainOracle": "Info", "OpenZeppelin": "Info", "PermitFunction": "Info", "ProxyContract": "Info", "ReflectToken": "Info", "RewardToken": "Info", "Stakable": "Info", "StandardERC20": "Info", "Upgradable": "Info", "Whitelist": "Info", "ContractFactory": "Info", "DelegateCall": "Info", "ProxySelectorClash": "Info", "NonStandardProxy": "Info", "Metamorphic": "Info", "MetamorphicExploit": "Info", "ProxyDestruction": "Info", "SuspiciousCall": "Info", "OwnerTransferCheck": "Info", "InterfaceCheck": "Info", "RenounceOwnership": "Info", "Timestamp": "Info", "Randomness": "Info", "Stateless": "Info", "Withdrawal": "Info",
-}
+var FlagDescriptions = make(map[string]string)
+var FlagCategories = make(map[string]string)
 
 func NewModel(msg InitMsg) *Model {
 	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
@@ -219,6 +43,9 @@ func NewModel(msg InitMsg) *Model {
 	ci.Placeholder = PlaceholderCommand
 	ci.Width = 40
 
+	tagInput := textinput.New()
+	tagInput.Width = 40
+
 	m := &Model{
 		List:                     l,
 		Items:                    msg.Items,
@@ -231,6 +58,7 @@ func NewModel(msg InitMsg) *Model {
 		FilterSince:              msg.FilterSince,
 		FilterUntil:              msg.FilterUntil,
 		SearchInput:              ti,
+		TagInput:                 tagInput,
 		Help:                     help.New(),
 		ShowSidePane:             true,
 		MaxRiskScore:             msg.MaxRiskScore,
@@ -254,9 +82,9 @@ func NewModel(msg InitMsg) *Model {
 		LatestHighRiskEntry:      msg.LatestHighRiskEntry,
 		HighRiskBanner:           msg.HighRiskBanner,
 		LogFilePath:              msg.LogFilePath,
-		StateFilePath:            msg.StateFilePath,
 		ApiHealth:                make(map[string]string),
 		LatencyThresholds:        msg.LatencyThresholds,
+		DB:                       msg.DB,
 	}
 
 	m.Stats.Process(m.Items)
@@ -308,6 +136,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.InTimeFilterMode {
 		return m.updateTimeFilter(msg)
+	}
+	if m.ShowingSavedContracts {
+		return m.updateSavedContractsView(msg)
+	}
+	if m.ShowingComparison {
+		return m.updateComparisonView(msg)
 	}
 
 	switch msg := msg.(type) {
@@ -463,9 +297,15 @@ func (m Model) View() string {
 	if m.ConfirmingReview {
 		return m.renderConfirmation(PromptReview)
 	}
+	if m.ConfirmingDelete {
+		return m.renderConfirmation(PromptDelete)
+	}
 
 	if m.InSearchMode || m.InTimeFilterMode {
 		return m.renderSearchDialog()
+	}
+	if m.InTagInputMode {
+		return m.renderTagInputDialog()
 	}
 	if m.ShowingFilterList {
 		return m.renderFilterListDialog()
@@ -487,6 +327,12 @@ func (m Model) View() string {
 	}
 	if m.ShowingTimelineView {
 		return m.renderTimelineView()
+	}
+	if m.ShowingSavedContracts {
+		return m.renderSavedContractsView()
+	}
+	if m.ShowingComparison {
+		return m.renderComparisonView()
 	}
 	if m.ShowingCommandPalette {
 		return m.renderCommandPalette()
@@ -799,6 +645,10 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, AppKeys.ClearTokenTypeFilter):
 		return m.executeCommand("clear_token_type_filter")
 
+	case key.Matches(msg, AppKeys.ViewSavedContracts):
+		return m.executeCommand("view_saved_contracts")
+	case key.Matches(msg, AppKeys.CompareContract):
+		return m.executeCommand("compare_contract")
 	// Heatmap navigation (not in executeCommand)
 	case key.Matches(msg, AppKeys.HeatmapLeft):
 		if m.ShowingHeatmap {
@@ -908,6 +758,18 @@ func (m Model) renderSearchDialog() string {
 	return AppStyle.Render(lipgloss.Place(m.WindowWidth-h, m.WindowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
 }
 
+func (m Model) renderTagInputDialog() string {
+	h, v := AppStyle.GetFrameSize()
+	dialog := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(ColorSecondary)).
+		Padding(1, 2).
+		Render(
+			lipgloss.JoinVertical(lipgloss.Center, "Edit Tags", "", m.TagInput.View()),
+		)
+	return AppStyle.Render(lipgloss.Place(m.WindowWidth-h, m.WindowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
+}
+
 func (m Model) renderFilterListDialog() string {
 	h, v := AppStyle.GetFrameSize()
 	dialog := lipgloss.NewStyle().
@@ -935,6 +797,15 @@ func (m Model) renderTimelineView() string {
 	return AppStyle.Render(lipgloss.Place(m.WindowWidth-h, m.WindowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
 }
 
+func (m Model) renderSavedContractsView() string {
+	h, v := AppStyle.GetFrameSize()
+	dialog := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(ColorSecondary)).
+		Render(m.SavedContractsList.View())
+	return AppStyle.Render(lipgloss.Place(m.WindowWidth-h, m.WindowHeight-v, lipgloss.Center, lipgloss.Center, dialog))
+}
+
 func (m Model) renderDetailView() string {
 	header := TitleStyle.Render(TitleEventDetails)
 	if m.NewAlertInDetail {
@@ -949,6 +820,107 @@ func (m Model) renderDetailView() string {
 	)
 
 	return AppStyle.Render(content)
+}
+
+func (m Model) renderComparisonView() string {
+	header := TitleStyle.Render(" Contract Comparison ")
+
+	width := m.WindowWidth - 4
+	halfWidth := width / 2
+
+	styleLabel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ColorAccent))
+	styleValue := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText))
+	styleDiff := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorCriticalRisk))
+	styleLogKey := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSecondary))
+	styleLogVal := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText))
+	styleLogAddr := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorAccent))
+	styleLogNum := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess))
+
+	renderBlock := func(data *BlockchainData, title string) string {
+		var sb strings.Builder
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Underline(true).Render(title) + "\n\n")
+		if data == nil {
+			sb.WriteString("No data")
+			return sb.String()
+		}
+
+		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("Contract:"), styleValue.Render(data.Contract)))
+		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("Balance:"), styleValue.Render(data.Balance)))
+		sb.WriteString(fmt.Sprintf("%s %d\n", styleLabel.Render("Code Size:"), data.CodeSize))
+		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("Gas Used:"), styleValue.Render(data.GasUsed)))
+		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("Status:"), styleValue.Render(data.Status)))
+
+		sb.WriteString("\n" + styleLabel.Render("Input Data") + "\n")
+		if len(data.InputData) > 0 {
+			displayInput := data.InputData
+			if len(displayInput) > 30 {
+				displayInput = displayInput[:30] + "..."
+			}
+			sb.WriteString(lipgloss.NewStyle().Faint(true).Render(displayInput) + "\n")
+			if data.DecodedInput != "" {
+				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(ColorAccent)).Render(data.DecodedInput) + "\n")
+			}
+		} else {
+			sb.WriteString(lipgloss.NewStyle().Faint(true).Render("None") + "\n")
+		}
+
+		sb.WriteString("\n" + styleLabel.Render("Logs") + "\n")
+		if len(data.DecodedLogs) > 0 {
+			for _, log := range data.DecodedLogs {
+				// Simple truncation for display
+				// Apply syntax highlighting
+				highlightedLog := log
+				highlightedLog = strings.ReplaceAll(highlightedLog, "Transfer", styleLogKey.Render("Transfer"))
+				highlightedLog = strings.ReplaceAll(highlightedLog, "Approval", styleLogKey.Render("Approval"))
+				highlightedLog = strings.ReplaceAll(highlightedLog, "Contract:", styleLogKey.Render("Contract:"))
+				highlightedLog = strings.ReplaceAll(highlightedLog, "From:", styleLogKey.Render("From:"))
+				highlightedLog = strings.ReplaceAll(highlightedLog, "To:", styleLogKey.Render("To:"))
+				highlightedLog = strings.ReplaceAll(highlightedLog, "Value:", styleLogKey.Render("Value:"))
+				highlightedLog = strings.ReplaceAll(highlightedLog, "Owner:", styleLogKey.Render("Owner:"))
+				highlightedLog = strings.ReplaceAll(highlightedLog, "Spender:", styleLogKey.Render("Spender:"))
+				highlightedLog = strings.ReplaceAll(highlightedLog, "TokenID:", styleLogKey.Render("TokenID:"))
+
+				// Highlight addresses (0x...)
+				words := strings.Fields(highlightedLog)
+				for i, w := range words {
+					if strings.HasPrefix(w, "0x") && len(w) > 10 {
+						words[i] = styleLogAddr.Render(w)
+					}
+				}
+				lines := strings.Split(strings.Join(words, " "), "\n")
+				for _, line := range lines {
+					if len(line) > 40 {
+						line = line[:37] + "..."
+					}
+					sb.WriteString(lipgloss.NewStyle().Faint(true).Render(line) + "\n")
+				}
+				sb.WriteString("\n")
+			}
+		} else {
+			sb.WriteString(lipgloss.NewStyle().Faint(true).Render("None") + "\n")
+		}
+		return sb.String()
+	}
+
+	left := renderBlock(m.DetailData, "Current")
+	right := renderBlock(m.ComparisonData, "Saved")
+
+	// Simple diff highlighting (conceptual)
+	if m.DetailData != nil && m.ComparisonData != nil {
+		if m.DetailData.Balance != m.ComparisonData.Balance {
+			right = strings.Replace(right, m.ComparisonData.Balance, styleDiff.Render(m.ComparisonData.Balance), 1)
+		}
+		// Add more diff logic here
+	}
+
+	content := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(halfWidth).Render(left),
+		lipgloss.NewStyle().Width(halfWidth).Render(right),
+	)
+
+	help := lipgloss.NewStyle().Faint(true).Render("(esc to close)")
+
+	return AppStyle.Render(lipgloss.JoinVertical(lipgloss.Left, header, "\n", content, "\n", help))
 }
 
 func (m Model) sideView() string {
@@ -1157,6 +1129,28 @@ func (m *Model) openTimelineView(contractAddr string) {
 	m.TimelineList = l
 	m.TimelineContract = contractAddr
 	m.ShowingTimelineView = true
+}
+
+func (m *Model) openSavedContractsView(contracts []string) {
+	var items []list.Item
+	for _, c := range contracts {
+		tags, _ := m.DB.GetContractTags(c)
+		items = append(items, savedContractItem{
+			contract: c,
+			tags:     tags,
+		})
+	}
+
+	delegate := list.NewDefaultDelegate()
+	l := list.New(items, delegate, 60, 20)
+	l.Title = "Saved Contracts"
+
+	l.SetFilteringEnabled(true)
+	h, v := AppStyle.GetFrameSize()
+	l.SetSize(m.WindowWidth-h-4, m.WindowHeight-v-4)
+
+	m.SavedContractsList = l
+	m.ShowingSavedContracts = true
 }
 
 func (m *Model) openFilterList(filterType string) {
@@ -1457,6 +1451,7 @@ func (m Model) renderCheatSheet() string {
 		{"D", "Deployer view"}, {"T", "Timeline view"},
 		{"B", "Toggle auto-verify"}, {"tab", "Focus sidebar"},
 		{"e", "Filter token type"}, {"E", "Clear token filter"},
+		{"C", "Saved contracts"}, {"=", "Compare contract"}, {"t", "Tag contract"},
 	}
 
 	mid := (len(shortcuts) + 1) / 2
@@ -1620,7 +1615,7 @@ func (i timelineItem) FilterValue() string {
 }
 
 func getFlagDescription(f string) string {
-	if desc, ok := flagDescriptions[f]; ok {
+	if desc, ok := FlagDescriptions[f]; ok {
 		return desc
 	}
 	return "Filter by " + f
@@ -1868,7 +1863,7 @@ func renderDetail(e stats.LogEntry, width int, selectedFlagIdx int, data *Blockc
 	catMap := make(map[string][]string)
 	for _, f := range e.Flags {
 		cat := "Other"
-		if c, ok := flagCategories[f]; ok {
+		if c, ok := FlagCategories[f]; ok {
 			cat = c
 		}
 		catMap[cat] = append(catMap[cat], f)
@@ -2507,7 +2502,7 @@ func (m *Model) generateMainHelpPage(width int) string {
 		allBindings = append(allBindings, group...)
 	}
 	// Add other keys not in FullHelp
-	allBindings = append(allBindings, AppKeys.Filter, AppKeys.IncreaseRisk, AppKeys.DecreaseRisk, AppKeys.IncreaseMaxRisk, AppKeys.DecreaseMaxRisk, AppKeys.Heatmap, AppKeys.ZoomIn, AppKeys.ZoomOut, AppKeys.HeatmapReset, AppKeys.HeatmapLeft, AppKeys.HeatmapRight, AppKeys.Compact, AppKeys.ToggleFooter, AppKeys.HeatmapFollow, AppKeys.JumpToAlert, AppKeys.StatsView, AppKeys.CheatSheet, AppKeys.IncreaseSidePane, AppKeys.DecreaseSidePane, AppKeys.FilterTokenType, AppKeys.ClearTokenTypeFilter, AppKeys.ToggleWatchlist, AppKeys.ToggleAutoVerify, AppKeys.DeployerView, AppKeys.TimelineView, AppKeys.SidebarFocus)
+	allBindings = append(allBindings, AppKeys.Filter, AppKeys.IncreaseRisk, AppKeys.DecreaseRisk, AppKeys.IncreaseMaxRisk, AppKeys.DecreaseMaxRisk, AppKeys.Heatmap, AppKeys.ZoomIn, AppKeys.ZoomOut, AppKeys.HeatmapReset, AppKeys.HeatmapLeft, AppKeys.HeatmapRight, AppKeys.Compact, AppKeys.ToggleFooter, AppKeys.HeatmapFollow, AppKeys.JumpToAlert, AppKeys.StatsView, AppKeys.CheatSheet, AppKeys.IncreaseSidePane, AppKeys.DecreaseSidePane, AppKeys.FilterTokenType, AppKeys.ClearTokenTypeFilter, AppKeys.ToggleWatchlist, AppKeys.ToggleAutoVerify, AppKeys.DeployerView, AppKeys.TimelineView, AppKeys.SidebarFocus, AppKeys.ViewSavedContracts, AppKeys.CompareContract, AppKeys.TagContract)
 
 	// Create a map to format keys nicely
 	keyDisplayMap := map[string]string{
@@ -2564,11 +2559,11 @@ func (m *Model) generateFlagHelpPages() []string {
 	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText))
 
 	categories := make(map[string][]string)
-	for flag, category := range flagCategories {
+	for flag, category := range FlagCategories {
 		categories[category] = append(categories[category], flag)
 	}
-	for flag := range flagDescriptions {
-		if _, ok := flagCategories[flag]; !ok {
+	for flag := range FlagDescriptions {
+		if _, ok := FlagCategories[flag]; !ok {
 			categories["Other"] = append(categories["Other"], flag)
 		}
 	}
