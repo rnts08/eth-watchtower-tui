@@ -79,6 +79,7 @@ func init() {
 		"edit_config":             handleEditConfig,
 		"reset_stats":             handleResetStats,
 		"clear_cache":             handleClearCache,
+		"prune_cache":             handlePruneCache,
 	}
 }
 
@@ -96,7 +97,7 @@ func handleEditConfig(m *Model) (tea.Model, tea.Cmd) {
 	m.ConfigFocusIndex = 0
 
 	// Populate inputs with current config
-	labels := []string{"Log File Path", "Min Risk Score", "Max Risk Score", "RPC URLs (comma sep)", "Etherscan API Key", "CoinMarketCap API Key"}
+	labels := []string{"Log File Path", "Min Risk Score", "Max Risk Score", "RPC URLs (comma sep)", "Etherscan API Key", "CoinMarketCap API Key", "Cache TTL (hours)"}
 	defaults := []string{
 		m.LogFilePath,
 		fmt.Sprintf("%d", m.MinRiskScore),
@@ -104,6 +105,7 @@ func handleEditConfig(m *Model) (tea.Model, tea.Cmd) {
 		strings.Join(m.RpcUrls, ","),
 		m.EtherscanApiKey,
 		m.CoinmarketcapApiKey,
+		fmt.Sprintf("%d", m.CacheTTL),
 	}
 
 	m.ConfigInputs = make([]textinput.Model, len(labels))
@@ -130,8 +132,28 @@ func handleResetStats(m *Model) (tea.Model, tea.Cmd) {
 
 func handleClearCache(m *Model) (tea.Model, tea.Cmd) {
 	m.DetailCache = make(map[string]*BlockchainData)
-	m.saveCache()
+	m.CacheSizeBytes = 0
+	if m.DB != nil {
+		_ = m.DB.ClearCache()
+	}
 	m.AlertMsg = "Detail cache cleared"
+	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+		return ClearAlertMsg{}
+	})
+}
+
+func handlePruneCache(m *Model) (tea.Model, tea.Cmd) {
+	if m.DB != nil && m.CacheTTL > 0 {
+		err := m.DB.PruneCache(time.Duration(m.CacheTTL) * time.Hour)
+		if err != nil {
+			m.AlertMsg = fmt.Sprintf("Error pruning cache: %v", err)
+		} else {
+			m.AlertMsg = fmt.Sprintf("Cache pruned (>%dh)", m.CacheTTL)
+			m.LastPruneTime = time.Now()
+		}
+	} else {
+		m.AlertMsg = "Cache pruning disabled or DB unavailable"
+	}
 	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
 		return ClearAlertMsg{}
 	})
@@ -337,6 +359,9 @@ func handleToggleHeatmap(m *Model) (tea.Model, tea.Cmd) {
 
 func handleToggleStats(m *Model) (tea.Model, tea.Cmd) {
 	m.ShowingStats = !m.ShowingStats
+	if m.ShowingStats {
+		m.StatsFocusIndex = 0
+	}
 	return m, nil
 }
 

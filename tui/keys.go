@@ -245,4 +245,5 @@ var availableCommands = []CommandItem{
 	{"Save Contract", "Save current contract details", "save_contract_details"},
 	{"Reset Statistics", "Reset all persistent statistics", "reset_stats"},
 	{"Clear Detail Cache", "Clear cached on-chain data", "clear_cache"},
+	{"Prune Cache", "Remove expired cache entries", "prune_cache"},
 }

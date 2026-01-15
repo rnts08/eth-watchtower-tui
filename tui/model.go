@@ -182,6 +182,7 @@ type Model struct {
 	ConfigFocusIndex         int
 	SidebarActive            bool
 	SidebarSelection         int
+	StatsFocusIndex          int
 	LatencyThresholds        config.LatencyThresholds
 	TopDeployers             []stats.DeployerStats
 	DB                       *db.DB
@@ -192,7 +193,9 @@ type Model struct {
 	ComparisonData           *BlockchainData
 	ComparisonSource         string // "Saved" or contract address
 	DetailCache              map[string]*BlockchainData
-	CacheFilePath            string
+	CacheSizeBytes           int64
+	CacheTTL                 int // In hours
+	LastPruneTime            time.Time
 }
 
 type InitMsg struct {
@@ -224,6 +227,7 @@ type InitMsg struct {
 	TopDeployers             []stats.DeployerStats
 	DB                       *db.DB
 	InConfigMode             bool
+	CacheTTL                 int
 }
 
 type initCompleteMsg struct{}

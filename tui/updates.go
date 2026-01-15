@@ -3,7 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
-	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -294,11 +294,51 @@ func (m *Model) updateABIView(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updateStats(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Reconstruct the sorted list to handle navigation and selection
+	type kv struct {
+		Key   string
+		Value int
+	}
+	var ss []kv
+	for k, v := range m.Stats.FlagCounts {
+		ss = append(ss, kv{k, v})
+	}
+	sort.Slice(ss, func(i, j int) bool {
+		if ss[i].Value != ss[j].Value {
+			return ss[i].Value > ss[j].Value
+		}
+		return ss[i].Key < ss[j].Key
+	})
+	limit := 15
+	if len(ss) > limit {
+		ss = ss[:limit]
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if key.Matches(msg, AppKeys.Quit) || key.Matches(msg, AppKeys.StatsView) {
 			m.ShowingStats = false
 			return m, nil
+		}
+		switch msg.String() {
+		case "up", "k":
+			if m.StatsFocusIndex > 0 {
+				m.StatsFocusIndex--
+			}
+		case "down", "j":
+			if m.StatsFocusIndex < len(ss)-1 {
+				m.StatsFocusIndex++
+			}
+		case "enter":
+			if len(ss) > 0 && m.StatsFocusIndex >= 0 && m.StatsFocusIndex < len(ss) {
+				flag := ss[m.StatsFocusIndex].Key
+				m.ActiveFlagFilter = flag
+				m.ShowingStats = false
+				m.AlertMsg = fmt.Sprintf("Filtering by flag: %s", flag)
+				return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+					return ClearAlertMsg{}
+				}))
+			}
 		}
 	case tea.WindowSizeMsg:
 		m.resize(msg.Width, msg.Height)
@@ -500,17 +540,9 @@ func (m *Model) saveAppState() error {
 		TopDeployers:        m.TopDeployers,
 		Stats:               m.Stats,
 	}
-	m.saveCache()
 	return m.DB.SaveState(state)
 }
 
 func updateListModel(l list.Model, msg tea.Msg) (list.Model, tea.Cmd) {
 	return l.Update(msg)
-}
-
-func (m *Model) saveCache() {
-	data, err := json.Marshal(m.DetailCache)
-	if err == nil {
-		_ = os.WriteFile(m.CacheFilePath, data, 0644)
-	}
 }

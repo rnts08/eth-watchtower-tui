@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,7 +61,7 @@ func NewModel(msg InitMsg) *Model {
 
 	var configInputs []textinput.Model
 	if msg.InConfigMode {
-		labels := []string{"Log File Path", "Min Risk Score", "Max Risk Score", "RPC URLs (comma sep)", "Etherscan API Key", "CoinMarketCap API Key"}
+		labels := []string{"Log File Path", "Min Risk Score", "Max Risk Score", "RPC URLs (comma sep)", "Etherscan API Key", "CoinMarketCap API Key", "Cache TTL (hours)"}
 		defaults := []string{
 			msg.LogFilePath,
 			fmt.Sprintf("%d", msg.MinRiskScore),
@@ -70,6 +69,7 @@ func NewModel(msg InitMsg) *Model {
 			strings.Join(msg.RpcUrls, ","),
 			msg.EtherscanApiKey,
 			msg.CoinmarketcapApiKey,
+			fmt.Sprintf("%d", msg.CacheTTL),
 		}
 
 		for i := range labels {
@@ -132,8 +132,12 @@ func NewModel(msg InitMsg) *Model {
 		InConfigMode:             msg.InConfigMode,
 		ConfigInputs:             configInputs,
 		DetailCache:              make(map[string]*BlockchainData),
-		CacheFilePath:            "eth-watchtower-cache.json",
 		AlertMsg:                 "Initializing...",
+		CacheTTL:                 msg.CacheTTL,
+	}
+
+	if m.CacheTTL == 0 {
+		m.CacheTTL = 168 // Default 7 days
 	}
 
 	m.loadCache()
@@ -348,6 +352,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.LoadingDetail = false
 			m.DetailData = msg.Data
 			if msg.Data != nil && msg.Data.Error == nil {
+				if _, exists := m.DetailCache[i.TxHash]; !exists {
+					if b, err := json.Marshal(msg.Data); err == nil {
+						m.CacheSizeBytes += int64(len(b) + len(i.TxHash) + 2)
+					}
+				}
+				if m.DB != nil {
+					_ = m.DB.SaveCacheEntry(i.TxHash, func() []byte { b, _ := json.Marshal(msg.Data); return b }())
+				}
 				m.DetailCache[i.TxHash] = msg.Data
 			}
 			// Check for pre-existing verification data
@@ -1093,6 +1105,7 @@ func (m *Model) updateConfigView(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(rpcs) == 0 || (len(rpcs) == 1 && rpcs[0] == "") {
 					rpcs = []string{"https://eth.llamarpc.com"} // Fallback default
 				}
+				cacheTTL, _ := strconv.Atoi(m.ConfigInputs[6].Value())
 
 				cfg := config.Config{
 					LogFilePath:         m.ConfigInputs[0].Value(),
@@ -1125,6 +1138,7 @@ func (m *Model) updateConfigView(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.RpcUrls = cfg.RpcUrls
 				m.EtherscanApiKey = cfg.EtherscanApiKey
 				m.CoinmarketcapApiKey = cfg.CoinmarketcapApiKey
+				m.CacheTTL = cacheTTL
 
 				// Re-run health checks with new RPCs
 				m.ApiHealth = make(map[string]string)
@@ -1178,7 +1192,7 @@ func (m Model) renderConfigView() string {
 	var sb strings.Builder
 	sb.WriteString(TitleStyle.Render(" Configuration Setup ") + "\n\n")
 
-	labels := []string{"Log File Path", "Min Risk Score", "Max Risk Score", "RPC URLs", "Etherscan API Key", "CoinMarketCap API Key"}
+	labels := []string{"Log File Path", "Min Risk Score", "Max Risk Score", "RPC URLs", "Etherscan API Key", "CoinMarketCap API Key", "Cache TTL (hours)"}
 
 	for i, input := range m.ConfigInputs {
 		label := labels[i]
@@ -1598,7 +1612,7 @@ func (m Model) statsDashboardView() string {
 	subTitle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubText)).Render
 
 	renderStat := func(sb *strings.Builder, label, value string) {
-		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render(label), styleValue.Render(value)))
+		fmt.Fprintf(sb, "%s %s\n", styleLabel.Render(label), styleValue.Render(value))
 	}
 
 	// --- Left Column ---
@@ -1634,7 +1648,14 @@ func (m Model) statsDashboardView() string {
 	renderStat(&leftSb, "Unique Contracts", fmt.Sprintf("%d", m.Stats.UniqueContracts))
 	renderStat(&leftSb, "Unique Deployers", fmt.Sprintf("%d", m.Stats.UniqueDeployers))
 	renderStat(&leftSb, "Unique Labels/Triggers", fmt.Sprintf("%d", len(m.Stats.FlagCounts)))
-	renderStat(&leftSb, "Cached Details", fmt.Sprintf("%d", len(m.DetailCache)))
+
+	sizeStr := fmt.Sprintf("%d B", m.CacheSizeBytes)
+	if m.CacheSizeBytes > 1024*1024 {
+		sizeStr = fmt.Sprintf("%.2f MB", float64(m.CacheSizeBytes)/(1024*1024))
+	} else if m.CacheSizeBytes > 1024 {
+		sizeStr = fmt.Sprintf("%.2f KB", float64(m.CacheSizeBytes)/1024)
+	}
+	renderStat(&leftSb, "Cached Details", fmt.Sprintf("%d (%s)", len(m.DetailCache), sizeStr))
 
 	mtbe := "N/A"
 	if m.Stats.TotalEvents > 1 && m.Stats.LastEventTime > m.Stats.FirstEventTime {
@@ -1742,12 +1763,45 @@ func (m Model) statsDashboardView() string {
 		rightSb.WriteString(fmt.Sprintf("%-5s %s %d (%.1f%%)\n", rangeLabel, color.Render(bar), count, pct))
 	}
 
-	rightSb.WriteString("\n" + subTitle("Overall Top Flags") + "\n")
-
 	type kv struct {
 		Key   string
 		Value int
 	}
+
+	keyWidth := 20
+	barMaxFlag := halfWidth - keyWidth - 10
+	if barMaxFlag < 1 {
+		barMaxFlag = 1
+	}
+
+	rightSb.WriteString("\n" + subTitle("Token Types") + "\n")
+	var tt []kv
+	for k, v := range m.Stats.TokenTypeCounts {
+		tt = append(tt, kv{k, v})
+	}
+	sort.Slice(tt, func(i, j int) bool {
+		if tt[i].Value != tt[j].Value {
+			return tt[i].Value > tt[j].Value
+		}
+		return tt[i].Key < tt[j].Key
+	})
+
+	maxTokenVal := 0
+	if len(tt) > 0 {
+		maxTokenVal = tt[0].Value
+	}
+
+	for _, kv := range tt {
+		barWidth := 0
+		if maxTokenVal > 0 {
+			barWidth = int((float64(kv.Value) / float64(maxTokenVal)) * float64(barMaxFlag))
+		}
+		bar := strings.Repeat("=", barWidth)
+		rightSb.WriteString(fmt.Sprintf("%-*s %s %d\n", keyWidth, kv.Key, lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSecondary)).Render(bar), kv.Value))
+	}
+
+	rightSb.WriteString("\n" + subTitle("Overall Top Flags") + "\n")
+
 	var ss []kv
 	for k, v := range m.Stats.FlagCounts {
 		ss = append(ss, kv{k, v})
@@ -1764,12 +1818,6 @@ func (m Model) statsDashboardView() string {
 		maxFlagVal = ss[0].Value
 	}
 
-	keyWidth := 20
-	barMaxFlag := halfWidth - keyWidth - 10
-	if barMaxFlag < 1 {
-		barMaxFlag = 1
-	}
-
 	for i := 0; i < len(ss) && i < 15; i++ {
 		kv := ss[i]
 		barWidth := 0
@@ -1783,8 +1831,18 @@ func (m Model) statsDashboardView() string {
 			keyName = keyName[:keyWidth-2] + ".."
 		}
 
-		rightSb.WriteString(fmt.Sprintf("%-*s %s %d\n", keyWidth, keyName, lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSecondary)).Render(bar), kv.Value))
+		cursor := "  "
+		rowStyle := lipgloss.NewStyle()
+		if i == m.StatsFocusIndex {
+			cursor = "> "
+			rowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(ColorAccent)).Bold(true)
+		}
+
+		line := fmt.Sprintf("%s%-*s %s %d", cursor, keyWidth, keyName, lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSecondary)).Render(bar), kv.Value)
+		rightSb.WriteString(rowStyle.Render(line) + "\n")
 	}
+
+	rightSb.WriteString("\n" + lipgloss.NewStyle().Faint(true).Render("(↑/↓ to select, Enter to filter)"))
 
 	content := lipgloss.JoinHorizontal(lipgloss.Top,
 		lipgloss.NewStyle().Width(halfWidth).PaddingRight(2).Render(leftSb.String()),
@@ -2142,6 +2200,19 @@ func (m Model) statsView() string {
 		s += styleDim.Render(" | Gas: ") + styleGood.Render(m.GasPrice+" Gwei")
 	}
 
+	// Cache Info
+	cacheSizeStr := fmt.Sprintf("%d B", m.CacheSizeBytes)
+	if m.CacheSizeBytes > 1024*1024 {
+		cacheSizeStr = fmt.Sprintf("%.1f MB", float64(m.CacheSizeBytes)/(1024*1024))
+	} else if m.CacheSizeBytes > 1024 {
+		cacheSizeStr = fmt.Sprintf("%.1f KB", float64(m.CacheSizeBytes)/1024)
+	}
+	s += styleDim.Render(" | Cache: ") + styleNorm.Render(cacheSizeStr)
+	if !m.LastPruneTime.IsZero() {
+		ago := time.Since(m.LastPruneTime).Round(time.Minute)
+		s += styleDim.Render(fmt.Sprintf(" (Pruned: %s ago)", ago.String()))
+	}
+
 	status := "LIVE"
 	if m.Paused {
 		status = "PAUSED"
@@ -2310,7 +2381,7 @@ func renderDetail(e stats.LogEntry, width int, selectedFlagIdx int, data *Blockc
 			statValueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText))
 
 			renderStat := func(sb *strings.Builder, label, value string) {
-				sb.WriteString(fmt.Sprintf("%s %s\n", statLabelStyle.Render(label+":"), statValueStyle.Render(value)))
+				fmt.Fprintf(sb, "%s %s\n", statLabelStyle.Render(label+":"), statValueStyle.Render(value))
 			}
 
 			// Column 1
@@ -3025,12 +3096,21 @@ func checkRpcHealth(url string) tea.Cmd {
 }
 
 func (m *Model) loadCache() {
-	if _, err := os.Stat(m.CacheFilePath); err == nil {
-		data, err := os.ReadFile(m.CacheFilePath)
+	if m.DB != nil {
+		_ = m.DB.EnsureCacheTable()
+		// Prune cache entries older than configured TTL
+		if m.CacheTTL > 0 {
+			_ = m.DB.PruneCache(time.Duration(m.CacheTTL) * time.Hour)
+			m.LastPruneTime = time.Now()
+		}
+		cache, err := m.DB.LoadCache()
 		if err == nil {
-			var cache map[string]*BlockchainData
-			if json.Unmarshal(data, &cache) == nil {
-				m.DetailCache = cache
+			for k, v := range cache {
+				var data BlockchainData
+				if json.Unmarshal(v, &data) == nil {
+					m.DetailCache[k] = &data
+					m.CacheSizeBytes += int64(len(v))
+				}
 			}
 		}
 	}

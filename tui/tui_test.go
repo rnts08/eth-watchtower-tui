@@ -349,7 +349,7 @@ func TestModel_RenderSearchDialog(t *testing.T) {
 func TestModel_ConfigView(t *testing.T) {
 	m := Model{
 		InConfigMode: true,
-		ConfigInputs: make([]textinput.Model, 6),
+		ConfigInputs: make([]textinput.Model, 7),
 	}
 	view := m.renderConfigView()
 	if !strings.Contains(view, "Configuration Setup") {
@@ -393,7 +393,7 @@ func TestModel_ComparisonView(t *testing.T) {
 }
 
 func TestModel_UpdateConfigView(t *testing.T) {
-	inputs := make([]textinput.Model, 6)
+	inputs := make([]textinput.Model, 7)
 	for i := range inputs {
 		inputs[i] = textinput.New()
 	}
@@ -424,7 +424,7 @@ func TestModel_UpdateConfigView(t *testing.T) {
 	}
 
 	// Test saving (mocking enter on save button)
-	m.ConfigFocusIndex = 6
+	m.ConfigFocusIndex = 7
 	msg = tea.KeyMsg{Type: tea.KeyEnter}
 	newM, _ = m.updateConfigView(msg)
 	m3 := newM.(*Model)
