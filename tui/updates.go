@@ -496,6 +496,7 @@ func (m *Model) saveAppState() error {
 		PinnedSet:           m.PinnedSet,
 		WatchedDeployersSet: m.WatchedDeployersSet,
 		CommandHistory:      m.CommandHistory,
+		TopDeployers:        m.TopDeployers,
 		Stats:               m.Stats,
 	}
 	return m.DB.SaveState(state)

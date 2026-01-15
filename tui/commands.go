@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"eth-watchtower-tui/stats"
 	"eth-watchtower-tui/util"
 
 	"github.com/atotto/clipboard"
@@ -17,62 +18,67 @@ import (
 type commandHandler func(m *Model) (tea.Model, tea.Cmd)
 
 // commandHandlers maps command IDs to their handler functions.
-var commandHandlers = map[string]commandHandler{
-	"pause":                   handlePause,
-	"clear_alerts":            handleClearAlerts,
-	"toggle_legend":           handleToggleLegend,
-	"toggle_heatmap":          handleToggleHeatmap,
-	"toggle_stats":            handleToggleStats,
-	"toggle_cheatsheet":       handleToggleCheatSheet,
-	"toggle_compact":          handleToggleCompact,
-	"toggle_footer":           handleToggleFooter,
-	"mark_all_reviewed":       handleMarkAllReviewed,
-	"reset_heatmap":           handleResetHeatmap,
-	"toggle_heatmap_follow":   handleToggleHeatmapFollow,
-	"clear_flag_filter":       handleClearFlagFilter,
-	"filter_flag":             handleFilterFlag,
-	"toggle_reviewed":         handleToggleReviewed,
-	"filter_token_type":       handleFilterTokenType,
-	"clear_token_type_filter": handleClearTokenTypeFilter,
-	"filter_since":            handleFilterSince,
-	"filter_until":            handleFilterUntil,
-	"clear_time_filter":       handleClearTimeFilter,
-	"copy_address":            handleCopyAddress,
-	"copy_deployer":           handleCopyDeployer,
-	"sort_events":             handleSortEvents,
-	"open_browser":            handleOpenBrowser,
-	"mark_reviewed":           handleMarkReviewed,
-	"watch_contract":          handleWatchContract,
-	"watch_deployer":          handleWatchDeployer,
-	"toggle_watchlist":        handleToggleWatchlist,
-	"view_deployer_contracts": handleViewDeployerContracts,
-	"timeline_view":           handleTimelineView,
-	"pin_contract":            handlePinContract,
-	"search_filter":           handleSearchFilter,
-	"jump_to_alert":           handleJumpToAlert,
-	"inc_min_risk":            handleIncMinRisk,
-	"dec_min_risk":            handleDecMinRisk,
-	"inc_max_risk":            handleIncMaxRisk,
-	"dec_max_risk":            handleDecMaxRisk,
-	"zoom_in":                 handleZoomIn,
-	"zoom_out":                handleZoomOut,
-	"inc_side_pane":           handleIncSidePane,
-	"dec_side_pane":           handleDecSidePane,
-	"help":                    handleHelp,
-	"toggle_auto_verify":      handleToggleAutoVerify,
-	"verify_contract":         handleVerifyContract,
-	"refresh_data":            handleRefreshData,
-	"copy_tx_hash":            handleCopyTxHash,
-	"toggle_json":             handleToggleJSON,
-	"view_abi":                handleViewABI,
-	"toggle_flag_info":        handleToggleFlagInfo,
-	"sidebar_focus":           handleSidebarFocus,
-	"save_contract_details":   handleSaveContractDetails,
-	"view_saved_contracts":    handleViewSavedContracts,
-	"compare_contract":        handleCompareContract,
-	"delete_saved_contract":   handleDeleteSavedContract,
-	"tag_contract":            handleTagContract,
-	"edit_config":             handleEditConfig,
+var commandHandlers map[string]commandHandler
+
+func init() {
+	commandHandlers = map[string]commandHandler{
+		"pause":                   handlePause,
+		"clear_alerts":            handleClearAlerts,
+		"toggle_legend":           handleToggleLegend,
+		"toggle_heatmap":          handleToggleHeatmap,
+		"toggle_stats":            handleToggleStats,
+		"toggle_cheatsheet":       handleToggleCheatSheet,
+		"toggle_compact":          handleToggleCompact,
+		"toggle_footer":           handleToggleFooter,
+		"mark_all_reviewed":       handleMarkAllReviewed,
+		"reset_heatmap":           handleResetHeatmap,
+		"toggle_heatmap_follow":   handleToggleHeatmapFollow,
+		"clear_flag_filter":       handleClearFlagFilter,
+		"filter_flag":             handleFilterFlag,
+		"toggle_reviewed":         handleToggleReviewed,
+		"filter_token_type":       handleFilterTokenType,
+		"clear_token_type_filter": handleClearTokenTypeFilter,
+		"filter_since":            handleFilterSince,
+		"filter_until":            handleFilterUntil,
+		"clear_time_filter":       handleClearTimeFilter,
+		"copy_address":            handleCopyAddress,
+		"copy_deployer":           handleCopyDeployer,
+		"sort_events":             handleSortEvents,
+		"open_browser":            handleOpenBrowser,
+		"mark_reviewed":           handleMarkReviewed,
+		"watch_contract":          handleWatchContract,
+		"watch_deployer":          handleWatchDeployer,
+		"toggle_watchlist":        handleToggleWatchlist,
+		"view_deployer_contracts": handleViewDeployerContracts,
+		"timeline_view":           handleTimelineView,
+		"pin_contract":            handlePinContract,
+		"search_filter":           handleSearchFilter,
+		"jump_to_alert":           handleJumpToAlert,
+		"inc_min_risk":            handleIncMinRisk,
+		"dec_min_risk":            handleDecMinRisk,
+		"inc_max_risk":            handleIncMaxRisk,
+		"dec_max_risk":            handleDecMaxRisk,
+		"zoom_in":                 handleZoomIn,
+		"zoom_out":                handleZoomOut,
+		"inc_side_pane":           handleIncSidePane,
+		"dec_side_pane":           handleDecSidePane,
+		"help":                    handleHelp,
+		"toggle_auto_verify":      handleToggleAutoVerify,
+		"verify_contract":         handleVerifyContract,
+		"refresh_data":            handleRefreshData,
+		"copy_tx_hash":            handleCopyTxHash,
+		"toggle_json":             handleToggleJSON,
+		"view_abi":                handleViewABI,
+		"toggle_flag_info":        handleToggleFlagInfo,
+		"sidebar_focus":           handleSidebarFocus,
+		"save_contract_details":   handleSaveContractDetails,
+		"view_saved_contracts":    handleViewSavedContracts,
+		"compare_contract":        handleCompareContract,
+		"delete_saved_contract":   handleDeleteSavedContract,
+		"tag_contract":            handleTagContract,
+		"edit_config":             handleEditConfig,
+		"reset_stats":             handleResetStats,
+	}
 }
 
 func handlePause(m *Model) (tea.Model, tea.Cmd) {
@@ -111,6 +117,16 @@ func handleEditConfig(m *Model) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func handleResetStats(m *Model) (tea.Model, tea.Cmd) {
+	m.Stats = stats.New()
+	m.TopDeployers = []stats.DeployerStats{}
+	m.AlertMsg = "All statistics have been reset."
+	_ = m.saveAppState()
+	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+		return ClearAlertMsg{}
+	})
+}
+
 func handleTagContract(m *Model) (tea.Model, tea.Cmd) {
 	if m.ShowingSavedContracts {
 		if selected, ok := m.SavedContractsList.SelectedItem().(savedContractItem); ok {
@@ -128,8 +144,22 @@ func handleTagContract(m *Model) (tea.Model, tea.Cmd) {
 func handleDeleteSavedContract(m *Model) (tea.Model, tea.Cmd) {
 	if m.ShowingSavedContracts {
 		if selected, ok := m.SavedContractsList.SelectedItem().(savedContractItem); ok {
-			m.ConfirmingDelete = true
-			m.AlertMsg = fmt.Sprintf("Delete %s?", selected.contract)
+			if m.ConfirmingDelete {
+				m.ConfirmingDelete = false
+				if m.DB != nil {
+					err := m.DB.DeleteSavedContract(selected.contract)
+					if err != nil {
+						m.AlertMsg = fmt.Sprintf("Error deleting contract: %v", err)
+					} else {
+						m.AlertMsg = fmt.Sprintf("Deleted contract %s", selected.contract)
+						_, cmd := m.executeCommand("view_saved_contracts")
+						return m, tea.Batch(cmd, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return ClearAlertMsg{} }))
+					}
+				}
+			} else {
+				m.ConfirmingDelete = true
+				m.AlertMsg = fmt.Sprintf("Delete %s?", selected.contract)
+			}
 		}
 	}
 	return m, nil
@@ -159,7 +189,7 @@ func handleCompareContract(m *Model) (tea.Model, tea.Cmd) {
 				// For simplicity, let's assume we can trigger a command that does the heavy lifting or just open the saved contracts list to pick one.
 				// Actually, a better UX might be: Press '=' -> Open list of saved contracts -> Pick one -> Show Diff.
 				// But if we want to diff against ITSELF (previous state), we check that first.
-				
+
 				// Let's go with: Open saved contracts list to select comparison target.
 				contracts, err := m.DB.ListSavedContracts()
 				if err != nil {

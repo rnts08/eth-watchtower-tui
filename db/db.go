@@ -24,6 +24,7 @@ type PersistentState struct {
 	PinnedSet           map[string]bool
 	WatchedDeployersSet map[string]bool
 	CommandHistory      []string
+	TopDeployers        []stats.DeployerStats
 	Stats               *stats.Stats
 }
 
@@ -113,6 +114,9 @@ func (d *DB) SaveState(s PersistentState) error {
 	if err := saveJSON("CommandHistory", s.CommandHistory); err != nil {
 		return err
 	}
+	if err := saveJSON("TopDeployers", s.TopDeployers); err != nil {
+		return err
+	}
 	if err := saveJSON("Stats", s.Stats); err != nil {
 		return err
 	}
@@ -129,6 +133,7 @@ func (d *DB) LoadState() (PersistentState, error) {
 	s.WatchlistSet = make(map[string]bool)
 	s.PinnedSet = make(map[string]bool)
 	s.WatchedDeployersSet = make(map[string]bool)
+	s.TopDeployers = []stats.DeployerStats{}
 	s.Stats = stats.New()
 
 	rows, err := d.conn.Query("SELECT key, value FROM app_state")
@@ -157,6 +162,8 @@ func (d *DB) LoadState() (PersistentState, error) {
 			_ = json.Unmarshal([]byte(value), &s.WatchedDeployersSet)
 		case "CommandHistory":
 			_ = json.Unmarshal([]byte(value), &s.CommandHistory)
+		case "TopDeployers":
+			_ = json.Unmarshal([]byte(value), &s.TopDeployers)
 		case "Stats":
 			_ = json.Unmarshal([]byte(value), &s.Stats)
 		}

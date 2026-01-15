@@ -183,6 +183,7 @@ type Model struct {
 	SidebarActive            bool
 	SidebarSelection         int
 	LatencyThresholds        config.LatencyThresholds
+	TopDeployers             []stats.DeployerStats
 	DB                       *db.DB
 	initProgressCh           chan string
 	ShowingSavedContracts    bool
@@ -218,6 +219,7 @@ type InitMsg struct {
 	HighRiskBanner           string
 	LogFilePath              string
 	LatencyThresholds        config.LatencyThresholds
+	TopDeployers             []stats.DeployerStats
 	DB                       *db.DB
 	InConfigMode             bool
 }

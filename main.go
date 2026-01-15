@@ -168,6 +168,10 @@ func main() {
 		}
 	}
 
+	// Calculate Top Deployers
+	s.UpdateDeployerStats(entries)
+	topDeployers := s.GetTopDeployers(5)
+
 	initialModel := tui.NewModel(tui.InitMsg{
 		Items:                    entries,
 		Stats:                    s,
@@ -192,6 +196,7 @@ func main() {
 		HighRiskBanner:           highRiskBanner,
 		LogFilePath:              logFilePath,
 		LatencyThresholds:        cfg.LatencyThresholds,
+		TopDeployers:             topDeployers,
 		DB:                       database,
 		InConfigMode:             !configFound,
 	})

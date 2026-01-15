@@ -243,4 +243,5 @@ var availableCommands = []CommandItem{
 	{"Tag Contract", "Add/Edit tags for saved contract", "tag_contract"},
 	{"Edit Configuration", "Open configuration editor", "edit_config"},
 	{"Save Contract", "Save current contract details", "save_contract_details"},
+	{"Reset Statistics", "Reset all persistent statistics", "reset_stats"},
 }

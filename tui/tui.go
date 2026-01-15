@@ -81,12 +81,17 @@ func NewModel(msg InitMsg) *Model {
 		configInputs[0].Focus()
 	}
 
+	sStats := msg.Stats
+	if sStats == nil {
+		sStats = stats.New()
+	}
+
 	m := &Model{
 		List:                     l,
 		Spinner:                  s,
 		Progress:                 prog,
 		Items:                    msg.Items,
-		Stats:                    stats.New(),
+		Stats:                    sStats,
 		FileOffset:               msg.FileOffset,
 		ReviewedSet:              msg.ReviewedSet,
 		WatchlistSet:             msg.WatchlistSet,
@@ -121,6 +126,7 @@ func NewModel(msg InitMsg) *Model {
 		LogFilePath:              msg.LogFilePath,
 		ApiHealth:                make(map[string]string),
 		LatencyThresholds:        msg.LatencyThresholds,
+		TopDeployers:             msg.TopDeployers,
 		DB:                       msg.DB,
 		InConfigMode:             msg.InConfigMode,
 		ConfigInputs:             configInputs,
@@ -1205,8 +1211,8 @@ func (m Model) sideView() string {
 	maxBucketVal := 0
 
 	barMax := m.SidePaneWidth - 24
-	if barMax < 5 {
-		barMax = 5
+	if barMax < 1 {
+		barMax = 1
 	}
 
 	for _, e := range m.Items {
@@ -1230,7 +1236,7 @@ func (m Model) sideView() string {
 		if maxBucketVal > 0 {
 			barWidth = int(float64(count) / float64(maxBucketVal) * float64(barMax))
 		}
-		bar := strings.Repeat("█", barWidth)
+		bar := strings.Repeat("=", barWidth)
 		color := SafeRiskStyle
 		if i*10 > 100 {
 			color = CriticalRiskStyle
@@ -1271,21 +1277,21 @@ func (m Model) sideView() string {
 	}
 
 	keyWidth := m.SidePaneWidth - 16
-	if keyWidth < 5 {
-		keyWidth = 5
+	if keyWidth < 1 {
+		keyWidth = 1
 	}
 	barMaxFlag := m.SidePaneWidth - keyWidth - 8
-	if barMaxFlag < 2 {
-		barMaxFlag = 2
+	if barMaxFlag < 1 {
+		barMaxFlag = 1
 	}
 
 	for i := 0; i < len(ss) && i < 10; i++ {
 		kv := ss[i]
 		barWidth := 0
 		if maxFlagVal > 0 {
-			barWidth = int(float64(kv.Value) / float64(maxFlagVal) * float64(barMaxFlag))
+			barWidth = int((float64(kv.Value) / float64(maxFlagVal)) * float64(barMaxFlag))
 		}
-		bar := strings.Repeat("█", barWidth)
+		bar := strings.Repeat("=", barWidth)
 
 		keyName := kv.Key
 		if len(keyName) > keyWidth {
@@ -1293,43 +1299,6 @@ func (m Model) sideView() string {
 		}
 
 		sb.WriteString(fmt.Sprintf("%-*s %s %d\n", keyWidth, keyName, lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSecondary)).Render(bar), kv.Value))
-	}
-
-	sb.WriteString("\n" + subTitle("Top Suspicious Deployers") + "\n")
-	// Find top suspicious deployers (simple heuristic: highest avg risk or most high risk events)
-	deployerRisk := make(map[string]int)
-	for _, e := range m.Items {
-		if e.RiskScore > 50 {
-			deployerRisk[e.Deployer] += e.RiskScore
-		}
-	}
-	type deployerKV struct {
-		Deployer string
-		Score    int
-	}
-	var deployers []deployerKV
-	for k, v := range deployerRisk {
-		deployers = append(deployers, deployerKV{k, v})
-	}
-	sort.Slice(deployers, func(i, j int) bool {
-		return deployers[i].Score > deployers[j].Score
-	})
-
-	for i := 0; i < len(deployers) && i < 5; i++ {
-		d := deployers[i]
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText))
-		prefix := "  "
-		if m.SidebarActive && m.SidebarSelection == i {
-			style = style.Foreground(lipgloss.Color(ColorAccent)).Bold(true).Background(lipgloss.Color(ColorSelectionBG))
-			prefix = "> "
-		}
-
-		shortDeployer := d.Deployer
-		if len(shortDeployer) > 10 {
-			shortDeployer = shortDeployer[:6] + "..." + shortDeployer[len(shortDeployer)-4:]
-		}
-
-		sb.WriteString(style.Render(fmt.Sprintf("%s%s (Risk: %d)", prefix, shortDeployer, d.Score)) + "\n")
 	}
 
 	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubText)).Render("Press ? for Help"))
@@ -1608,24 +1577,33 @@ func (m Model) heatmapView() string {
 }
 
 func (m Model) statsDashboardView() string {
-	var sb strings.Builder
-	sb.WriteString(TitleStyle.Render(TitleStatsDashboard) + "\n\n")
+	header := TitleStyle.Render(TitleStatsDashboard) + "\n\n"
+
+	width := m.WindowWidth - 6
+	halfWidth := width / 2
+	if halfWidth < 40 {
+		halfWidth = 40
+	}
 
 	styleLabel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ColorAccent)).Width(28)
 	styleValue := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText))
+	subTitle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubText)).Render
 
-	renderStat := func(label, value string) {
+	renderStat := func(sb *strings.Builder, label, value string) {
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render(label), styleValue.Render(value)))
 	}
+
+	// --- Left Column ---
+	var leftSb strings.Builder
 
 	uptime := time.Since(m.ProgramStart)
 	if uptime < time.Second {
 		uptime = time.Second
 	}
 
-	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubText)).Render("--- Program Statistics ---") + "\n")
-	renderStat("Total Events Processed", fmt.Sprintf("%d", m.Stats.TotalEvents))
-	renderStat("Events Per Second", fmt.Sprintf("%.2f", float64(m.Stats.TotalEvents)/uptime.Seconds()))
+	leftSb.WriteString(subTitle("--- Program Statistics ---") + "\n")
+	renderStat(&leftSb, "Total Events Processed", fmt.Sprintf("%d", m.Stats.TotalEvents))
+	renderStat(&leftSb, "Events Per Second", fmt.Sprintf("%.2f", float64(m.Stats.TotalEvents)/uptime.Seconds()))
 
 	dataSize := float64(m.FileOffset)
 	unit := "B"
@@ -1636,18 +1614,18 @@ func (m Model) statsDashboardView() string {
 		dataSize /= 1024
 		unit = "KB"
 	}
-	renderStat("Data Processed", fmt.Sprintf("%.2f %s", dataSize, unit))
+	renderStat(&leftSb, "Data Processed", fmt.Sprintf("%.2f %s", dataSize, unit))
 
 	latency := "N/A"
 	if m.RpcLatency > 0 {
 		latency = m.RpcLatency.Round(time.Millisecond).String()
 	}
-	renderStat("RPC Latency", latency)
+	renderStat(&leftSb, "RPC Latency", latency)
 
-	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubText)).Render("--- Data Statistics ---") + "\n")
-	renderStat("Unique Contracts", fmt.Sprintf("%d", m.Stats.UniqueContracts))
-	renderStat("Unique Deployers", fmt.Sprintf("%d", m.Stats.UniqueDeployers))
-	renderStat("Unique Labels/Triggers", fmt.Sprintf("%d", len(m.Stats.FlagCounts)))
+	leftSb.WriteString("\n" + subTitle("--- Data Statistics ---") + "\n")
+	renderStat(&leftSb, "Unique Contracts", fmt.Sprintf("%d", m.Stats.UniqueContracts))
+	renderStat(&leftSb, "Unique Deployers", fmt.Sprintf("%d", m.Stats.UniqueDeployers))
+	renderStat(&leftSb, "Unique Labels/Triggers", fmt.Sprintf("%d", len(m.Stats.FlagCounts)))
 
 	mtbe := "N/A"
 	if m.Stats.TotalEvents > 1 && m.Stats.LastEventTime > m.Stats.FirstEventTime {
@@ -1655,9 +1633,23 @@ func (m Model) statsDashboardView() string {
 		avg := diff / float64(m.Stats.TotalEvents-1)
 		mtbe = fmt.Sprintf("%.2fs", avg)
 	}
-	renderStat("Mean Time Between Events", mtbe)
+	renderStat(&leftSb, "Mean Time Between Events", mtbe)
 
-	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubText)).Render("--- API Health ---") + "\n")
+	leftSb.WriteString("\n" + subTitle("--- Top Deployers by Risk ---") + "\n")
+	if len(m.TopDeployers) > 0 {
+		for i, d := range m.TopDeployers {
+			if i >= 5 {
+				break
+			}
+			shortAddr := d.Address
+			if len(shortAddr) > 12 {
+				shortAddr = shortAddr[:6] + "..." + shortAddr[len(shortAddr)-4:]
+			}
+			renderStat(&leftSb, fmt.Sprintf("%d. %s", i+1, shortAddr), fmt.Sprintf("Total Risk: %d, Contracts: %d", d.TotalRisk, d.ContractCount))
+		}
+	}
+
+	leftSb.WriteString("\n" + subTitle("--- API Health ---") + "\n")
 	okStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess))
 	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorError))
 
@@ -1686,10 +1678,111 @@ func (m Model) statsDashboardView() string {
 		if status == "OK" {
 			statusStyle = okStyle
 		}
-		renderStat(url, statusStyle.Render(status))
+		renderStat(&leftSb, url, statusStyle.Render(status))
 	}
 
-	return AppStyle.Render(sb.String())
+	// --- Right Column ---
+	var rightSb strings.Builder
+
+	// Risk Distribution
+	rightSb.WriteString(subTitle("Overall Risk Distribution") + "\n")
+	buckets := make([]int, 10)
+	maxBucketVal := 0
+
+	for _, e := range m.Items {
+		idx := e.RiskScore / 10
+		if idx >= 10 {
+			idx = 9
+		}
+		buckets[idx]++
+		if buckets[idx] > maxBucketVal {
+			maxBucketVal = buckets[idx]
+		}
+	}
+
+	barMax := halfWidth - 24
+	if barMax < 1 {
+		barMax = 1
+	}
+
+	for i := 0; i < 10; i++ {
+		rangeLabel := fmt.Sprintf("%d-%d", i*10, (i*10)+9)
+		if i == 9 {
+			rangeLabel = "90+"
+		}
+		count := buckets[i]
+		barWidth := 0
+		if maxBucketVal > 0 {
+			barWidth = int(float64(count) / float64(maxBucketVal) * float64(barMax))
+		}
+		bar := strings.Repeat("=", barWidth)
+		color := SafeRiskStyle
+		if i*10 > 100 {
+			color = CriticalRiskStyle
+		} else if i*10 > 75 {
+			color = HighRiskStyle
+		} else if i*10 > 50 {
+			color = MedRiskStyle
+		} else if i*10 > 10 {
+			color = LowRiskStyle
+		}
+		pct := 0.0
+		if len(m.Items) > 0 {
+			pct = float64(count) / float64(len(m.Items)) * 100
+		}
+		rightSb.WriteString(fmt.Sprintf("%-5s %s %d (%.1f%%)\n", rangeLabel, color.Render(bar), count, pct))
+	}
+
+	rightSb.WriteString("\n" + subTitle("Overall Top Flags") + "\n")
+
+	type kv struct {
+		Key   string
+		Value int
+	}
+	var ss []kv
+	for k, v := range m.Stats.FlagCounts {
+		ss = append(ss, kv{k, v})
+	}
+	sort.Slice(ss, func(i, j int) bool {
+		if ss[i].Value != ss[j].Value {
+			return ss[i].Value > ss[j].Value
+		}
+		return ss[i].Key < ss[j].Key
+	})
+
+	maxFlagVal := 0
+	if len(ss) > 0 {
+		maxFlagVal = ss[0].Value
+	}
+
+	keyWidth := 20
+	barMaxFlag := halfWidth - keyWidth - 10
+	if barMaxFlag < 1 {
+		barMaxFlag = 1
+	}
+
+	for i := 0; i < len(ss) && i < 15; i++ {
+		kv := ss[i]
+		barWidth := 0
+		if maxFlagVal > 0 {
+			barWidth = int((float64(kv.Value) / float64(maxFlagVal)) * float64(barMaxFlag))
+		}
+		bar := strings.Repeat("=", barWidth)
+
+		keyName := kv.Key
+		if len(keyName) > keyWidth {
+			keyName = keyName[:keyWidth-2] + ".."
+		}
+
+		rightSb.WriteString(fmt.Sprintf("%-*s %s %d\n", keyWidth, keyName, lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSecondary)).Render(bar), kv.Value))
+	}
+
+	content := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(halfWidth).PaddingRight(2).Render(leftSb.String()),
+		lipgloss.NewStyle().Width(halfWidth).Render(rightSb.String()),
+	)
+
+	return AppStyle.Render(header + content)
 }
 
 func (m Model) renderCheatSheet() string {
