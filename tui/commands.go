@@ -78,6 +78,7 @@ func init() {
 		"tag_contract":            handleTagContract,
 		"edit_config":             handleEditConfig,
 		"reset_stats":             handleResetStats,
+		"clear_cache":             handleClearCache,
 	}
 }
 
@@ -122,6 +123,15 @@ func handleResetStats(m *Model) (tea.Model, tea.Cmd) {
 	m.TopDeployers = []stats.DeployerStats{}
 	m.AlertMsg = "All statistics have been reset."
 	_ = m.saveAppState()
+	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+		return ClearAlertMsg{}
+	})
+}
+
+func handleClearCache(m *Model) (tea.Model, tea.Cmd) {
+	m.DetailCache = make(map[string]*BlockchainData)
+	m.saveCache()
+	m.AlertMsg = "Detail cache cleared"
 	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
 		return ClearAlertMsg{}
 	})

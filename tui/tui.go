@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -130,8 +131,12 @@ func NewModel(msg InitMsg) *Model {
 		DB:                       msg.DB,
 		InConfigMode:             msg.InConfigMode,
 		ConfigInputs:             configInputs,
+		DetailCache:              make(map[string]*BlockchainData),
+		CacheFilePath:            "eth-watchtower-cache.json",
 		AlertMsg:                 "Initializing...",
 	}
+
+	m.loadCache()
 
 	return m
 }
@@ -342,6 +347,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if i, ok := m.List.SelectedItem().(item); ok && i.Contract == msg.Contract {
 			m.LoadingDetail = false
 			m.DetailData = msg.Data
+			if msg.Data != nil && msg.Data.Error == nil {
+				m.DetailCache[i.TxHash] = msg.Data
+			}
 			// Check for pre-existing verification data
 			if vStatus, ok := m.VerificationResults[msg.Contract]; ok {
 				m.DetailData.VerificationStatus = vStatus.Status
@@ -1626,6 +1634,7 @@ func (m Model) statsDashboardView() string {
 	renderStat(&leftSb, "Unique Contracts", fmt.Sprintf("%d", m.Stats.UniqueContracts))
 	renderStat(&leftSb, "Unique Deployers", fmt.Sprintf("%d", m.Stats.UniqueDeployers))
 	renderStat(&leftSb, "Unique Labels/Triggers", fmt.Sprintf("%d", len(m.Stats.FlagCounts)))
+	renderStat(&leftSb, "Cached Details", fmt.Sprintf("%d", len(m.DetailCache)))
 
 	mtbe := "N/A"
 	if m.Stats.TotalEvents > 1 && m.Stats.LastEventTime > m.Stats.FirstEventTime {
@@ -2169,6 +2178,14 @@ func (m *Model) openDetailView(i item) (tea.Model, tea.Cmd) {
 	m.DetailFlagInfoCollapsed = false
 	m.DetailData = nil
 	m.LoadingDetail = true
+
+	if data, ok := m.DetailCache[i.TxHash]; ok {
+		m.LoadingDetail = false
+		m.DetailData = data
+		m.Viewport.SetContent(renderDetail(i.LogEntry, m.WindowWidth, m.DetailFlagIndex, data, false, m.DetailFlagInfoCollapsed))
+		return m, nil
+	}
+
 	m.Viewport.SetContent(renderDetail(i.LogEntry, m.WindowWidth, m.DetailFlagIndex, nil, true, m.DetailFlagInfoCollapsed))
 	return m, fetchBlockchainData(m.RpcUrls, i.Contract, i.TxHash, m.CoinmarketcapApiKey)
 }
@@ -2288,39 +2305,57 @@ func renderDetail(e stats.LogEntry, width int, selectedFlagIdx int, data *Blockc
 		if data.Error != nil {
 			rightSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(ColorError)).Render("Error: "+data.Error.Error()) + "\n\n")
 		} else {
-			rightSb.WriteString(fmt.Sprintf("Balance: %s ETH\n", data.Balance))
-			rightSb.WriteString(fmt.Sprintf("Code Size: %d bytes\n", data.CodeSize))
+			var col1, col2 strings.Builder
+			statLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubText))
+			statValueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText))
+
+			renderStat := func(sb *strings.Builder, label, value string) {
+				sb.WriteString(fmt.Sprintf("%s %s\n", statLabelStyle.Render(label+":"), statValueStyle.Render(value)))
+			}
+
+			// Column 1
+			renderStat(&col1, "Balance", fmt.Sprintf("%s ETH", data.Balance))
+			renderStat(&col1, "Value", fmt.Sprintf("%s ETH", data.Value))
+			renderStat(&col1, "Tx Fee", fmt.Sprintf("%s ETH", data.TxFee))
+			statusColor := ColorError // Red
+			if data.Status == "Success" {
+				statusColor = ColorSuccess // Green
+			}
+			renderStat(&col1, "Status", lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Render(data.Status))
 			if data.VerificationStatus != "" {
 				statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorError))
 				statusText := data.VerificationStatus
 				if data.VerificationStatus == "Verified" {
 					statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess))
 					if data.ABI != "" {
-						statusText += " (Press 'A' for ABI)"
+						statusText += " ('A' for ABI)"
 					}
 				}
-				rightSb.WriteString(fmt.Sprintf("Source Code: %s\n", statusStyle.Render(statusText)))
+				renderStat(&col1, "Source", statusStyle.Render(statusText))
 			}
-			rightSb.WriteString(fmt.Sprintf("Gas Used: %s\n", data.GasUsed))
-			rightSb.WriteString(fmt.Sprintf("Gas Price: %s Gwei\n", data.GasPrice))
-			rightSb.WriteString(fmt.Sprintf("Tx Fee: %s ETH\n", data.TxFee))
-			rightSb.WriteString(fmt.Sprintf("Value: %s ETH\n", data.Value))
-			rightSb.WriteString(fmt.Sprintf("Nonce: %d\n", data.Nonce))
+
+			// Column 2
+			renderStat(&col2, "Code Size", fmt.Sprintf("%d bytes", data.CodeSize))
+			renderStat(&col2, "Gas Used", data.GasUsed)
+			renderStat(&col2, "Gas Price", fmt.Sprintf("%s Gwei", data.GasPrice))
+			renderStat(&col2, "Nonce", fmt.Sprintf("%d", data.Nonce))
+			renderStat(&col2, "Position", fmt.Sprintf("%d", data.TxIndex))
+
+			if data.TokenSymbol != "" {
+				renderStat(&col1, "Token", data.TokenSymbol)
+			}
 			if data.TokenPrice != "" {
-				rightSb.WriteString(fmt.Sprintf("Token Price: %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess)).Render(data.TokenPrice)))
+				renderStat(&col2, "Price", lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess)).Render(data.TokenPrice))
 			}
 			if data.TokenMarketCap != "" {
-				rightSb.WriteString(fmt.Sprintf("Market Cap: %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess)).Render(data.TokenMarketCap)))
+				renderStat(&col2, "Market Cap", lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess)).Render(data.TokenMarketCap))
 			}
 			if data.TokenVolume24h != "" {
-				rightSb.WriteString(fmt.Sprintf("24h Volume: %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess)).Render(data.TokenVolume24h)))
+				renderStat(&col2, "24h Volume", lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSuccess)).Render(data.TokenVolume24h))
 			}
-			rightSb.WriteString(fmt.Sprintf("Position: %d\n", data.TxIndex))
-			statusColor := ColorError // Red
-			if data.Status == "Success" {
-				statusColor = ColorSuccess // Green
-			}
-			rightSb.WriteString(fmt.Sprintf("Status: %s\n\n", lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Render(data.Status)))
+
+			onChainContent := lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(halfWidth/2).Render(col1.String()), lipgloss.NewStyle().Width(halfWidth/2).Render(col2.String()))
+			rightSb.WriteString(onChainContent + "\n")
 
 			rightSb.WriteString(styleLabel.Render("Input Data") + "\n")
 			if len(data.InputData) > 0 {
@@ -2986,6 +3021,18 @@ func checkRpcHealth(url string) tea.Cmd {
 			return ApiHealthMsg{URL: url, Status: fmt.Sprintf("Error: HTTP %d", resp.StatusCode)}
 		}
 		return ApiHealthMsg{URL: url, Status: "OK"}
+	}
+}
+
+func (m *Model) loadCache() {
+	if _, err := os.Stat(m.CacheFilePath); err == nil {
+		data, err := os.ReadFile(m.CacheFilePath)
+		if err == nil {
+			var cache map[string]*BlockchainData
+			if json.Unmarshal(data, &cache) == nil {
+				m.DetailCache = cache
+			}
+		}
 	}
 }
 

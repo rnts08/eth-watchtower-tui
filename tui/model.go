@@ -191,6 +191,8 @@ type Model struct {
 	ShowingComparison        bool
 	ComparisonData           *BlockchainData
 	ComparisonSource         string // "Saved" or contract address
+	DetailCache              map[string]*BlockchainData
+	CacheFilePath            string
 }
 
 type InitMsg struct {

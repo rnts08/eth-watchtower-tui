@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -499,9 +500,17 @@ func (m *Model) saveAppState() error {
 		TopDeployers:        m.TopDeployers,
 		Stats:               m.Stats,
 	}
+	m.saveCache()
 	return m.DB.SaveState(state)
 }
 
 func updateListModel(l list.Model, msg tea.Msg) (list.Model, tea.Cmd) {
 	return l.Update(msg)
+}
+
+func (m *Model) saveCache() {
+	data, err := json.Marshal(m.DetailCache)
+	if err == nil {
+		_ = os.WriteFile(m.CacheFilePath, data, 0644)
+	}
 }
