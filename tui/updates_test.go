@@ -2,8 +2,10 @@ package tui
 
 import (
 	"testing"
+	"time"
 
 	"eth-watchtower-tui/stats"
+	"eth-watchtower-tui/util"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/list"
@@ -244,5 +246,84 @@ func TestUpdateListModel(t *testing.T) {
 	// Verify selection moved
 	if updatedList.Index() != 1 {
 		t.Errorf("Expected list index to be 1 after KeyDown, got %d", updatedList.Index())
+	}
+}
+
+func TestUpdateListItems_Filtering(t *testing.T) {
+	now := time.Now()
+	items := []stats.LogEntry{
+		{Contract: "C1", RiskScore: 10, Flags: []string{"Flag1"}, TokenType: "ERC20", Timestamp: now.Unix(), Deployer: "D1", TxHash: "Tx1"},
+		{Contract: "C2", RiskScore: 80, Flags: []string{"Flag2"}, TokenType: "ERC721", Timestamp: now.Add(-2 * time.Hour).Unix(), Deployer: "D2", TxHash: "Tx2"},
+		{Contract: "C3", RiskScore: 5, Flags: []string{}, TokenType: "", Timestamp: now.Add(-24 * time.Hour).Unix(), Deployer: "D3", TxHash: "Tx3"},
+	}
+
+	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	m := &Model{
+		List:         l,
+		Items:        items,
+		ReviewedSet:  make(map[string]bool),
+		MinRiskScore: 0,
+		MaxRiskScore: 100,
+	}
+
+	// 1. No filters
+	m.updateListItems()
+	if len(m.List.Items()) != 3 {
+		t.Errorf("Expected 3 items, got %d", len(m.List.Items()))
+	}
+
+	// 2. Filter by Flag
+	m.ActiveFlagFilter = "Flag1"
+	m.updateListItems()
+	if len(m.List.Items()) != 1 {
+		t.Errorf("Expected 1 item with Flag1, got %d", len(m.List.Items()))
+	}
+	m.ActiveFlagFilter = ""
+
+	// 3. Filter by Token Type
+	m.ActiveTokenTypeFilter = "ERC721"
+	m.updateListItems()
+	if len(m.List.Items()) != 1 {
+		t.Errorf("Expected 1 item with ERC721, got %d", len(m.List.Items()))
+	}
+	m.ActiveTokenTypeFilter = ""
+
+	// 4. Filter by Risk Score
+	m.MinRiskScore = 50
+	m.updateListItems()
+	if len(m.List.Items()) != 1 {
+		t.Errorf("Expected 1 item with Risk > 50, got %d", len(m.List.Items()))
+	}
+	m.MinRiskScore = 0
+
+	// 5. Filter by Time (Since)
+	m.FilterSince = now.Add(-1 * time.Hour)
+	m.updateListItems()
+	if len(m.List.Items()) != 1 {
+		t.Errorf("Expected 1 item since 1 hour ago, got %d", len(m.List.Items()))
+	}
+	m.FilterSince = time.Time{}
+
+	// 6. Filter by Search
+	m.ActiveSearchQuery = "D3"
+	m.updateListItems()
+	if len(m.List.Items()) != 1 {
+		t.Errorf("Expected 1 item matching search 'D3', got %d", len(m.List.Items()))
+	}
+	m.ActiveSearchQuery = ""
+
+	// 7. Filter Reviewed
+	key := util.GetReviewKey(items[0])
+	m.ReviewedSet[key] = true
+	m.ShowReviewed = false
+	m.updateListItems()
+	if len(m.List.Items()) != 2 {
+		t.Errorf("Expected 2 unreviewed items, got %d", len(m.List.Items()))
+	}
+
+	m.ShowReviewed = true
+	m.updateListItems()
+	if len(m.List.Items()) != 3 {
+		t.Errorf("Expected 3 items when showing reviewed, got %d", len(m.List.Items()))
 	}
 }

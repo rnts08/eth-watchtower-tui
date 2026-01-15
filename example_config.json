@@ -1,0 +1,19 @@
+{
+  "logFilePath": "eth-watchtower.jsonl",
+  "stateFilePath": ".state",
+  "reviewedFilePath": ".reviewed",
+  "watchlistFilePath": ".watchlist",
+  "pinnedFilePath": ".pinned",
+  "watchedDeployersFilePath": ".watched_deployers",
+  "commandHistoryFilePath": ".command_history",
+  "resetState": false,
+  "minRiskScore": 10,
+  "maxRiskScore": 300,
+  "rpcUrls": [
+    "https://eth.llamarpc.com",
+    "https://ethereum-rpc.publicnode.com"
+  ],
+  "etherscanApiKey": "",
+  "coinmarketcapApiKey": "",
+  "autoVerifyContracts": false
+}

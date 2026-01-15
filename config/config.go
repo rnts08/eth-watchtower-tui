@@ -19,6 +19,12 @@ type Config struct {
 	RpcUrls              []string   `json:"rpcUrls"`
 	DefaultSidePaneWidth int        `json:"defaultSidePaneWidth"`
 	RiskColors           RiskColors `json:"riskColors"`
+	EtherscanApiKey      string     `json:"etherscanApiKey"`
+	ExplorerApiUrl       string     `json:"explorerApiUrl"`
+	ExplorerVerificationPath string `json:"explorerVerificationPath"`
+	CoinmarketcapApiKey  string     `json:"coinmarketcapApiKey"`
+	AutoVerifyContracts  bool       `json:"autoVerifyContracts"`
+	LatencyThresholds    LatencyThresholds `json:"latencyThresholds"`
 }
 
 type RiskColors struct {
@@ -27,6 +33,11 @@ type RiskColors struct {
 	Medium   string `json:"medium"`
 	Low      string `json:"low"`
 	Safe     string `json:"safe"`
+}
+
+type LatencyThresholds struct {
+	Medium int `json:"medium"` // Milliseconds
+	High   int `json:"high"`   // Milliseconds
 }
 
 func Load() Config {
@@ -44,6 +55,15 @@ func Load() Config {
 			Medium:   "#FFFF00",
 			Low:      "#FFFACD",
 			Safe:     "#00FF00",
+		},
+		EtherscanApiKey:     "",
+		ExplorerApiUrl:      "https://api.etherscan.io",
+		ExplorerVerificationPath: "/api?module=contract&action=getsourcecode&address=%s&apikey=%s",
+		CoinmarketcapApiKey: "",
+		AutoVerifyContracts: false,
+		LatencyThresholds: LatencyThresholds{
+			Medium: 200,
+			High:   500,
 		},
 	}
 
@@ -68,6 +88,15 @@ func CreateDefault() error {
 			Medium:   "#FFFF00",
 			Low:      "#FFFACD",
 			Safe:     "#00FF00",
+		},
+		EtherscanApiKey:     "",
+		ExplorerApiUrl:      "https://api.etherscan.io",
+		ExplorerVerificationPath: "/api?module=contract&action=getsourcecode&address=%s&apikey=%s",
+		CoinmarketcapApiKey: "",
+		AutoVerifyContracts: false,
+		LatencyThresholds: LatencyThresholds{
+			Medium: 200,
+			High:   500,
 		},
 	}
 

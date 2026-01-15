@@ -136,7 +136,7 @@ func main() {
 		if e.RiskScore >= 50 {
 			entryCopy := e
 			latestHighRiskEntry = &entryCopy
-			highRiskBanner = " ⚠️  HIGH RISK DETECTED (MISSED) ⚠️ "
+			highRiskBanner = " ⚠️  HIGH RISK DETECTED ⚠️ "
 			break
 		}
 	}
@@ -154,11 +154,17 @@ func main() {
 		MinRiskScore:        *minRiskFlag,
 		CommandHistory:      commandHistory,
 		RpcUrls:             cfg.RpcUrls,
+		EtherscanApiKey:     cfg.EtherscanApiKey,
+		ExplorerApiUrl:      cfg.ExplorerApiUrl,
+		ExplorerVerificationPath: cfg.ExplorerVerificationPath,
+		CoinmarketcapApiKey: cfg.CoinmarketcapApiKey,
 		SidePaneWidth:       initialSidePaneWidth,
+		AutoVerifyContracts: cfg.AutoVerifyContracts,
 		LatestHighRiskEntry: latestHighRiskEntry,
 		HighRiskBanner:      highRiskBanner,
 		LogFilePath:         logFilePath,
 		StateFilePath:       cfg.StateFilePath,
+		LatencyThresholds:   cfg.LatencyThresholds,
 	})
 
 	p := tea.NewProgram(initialModel, tea.WithAltScreen())

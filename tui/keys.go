@@ -19,7 +19,19 @@ type KeyMap struct {
 	ToggleLegend         key.Binding
 	Pin                  key.Binding
 	CopyDeployer         key.Binding
+	CopyTxHash           key.Binding
+	ToggleJSON           key.Binding
+	RefreshDetail        key.Binding
+	VerifyContract       key.Binding
+	ViewABI              key.Binding
+	ToggleAutoVerify     key.Binding
+	ToggleFlagInfo       key.Binding
+	DetailUp             key.Binding
+	DetailDown           key.Binding
 	WatchDeployer        key.Binding
+	ToggleWatchlist      key.Binding
+	DeployerView         key.Binding
+	TimelineView         key.Binding
 	IncreaseRisk         key.Binding
 	DecreaseRisk         key.Binding
 	Heatmap              key.Binding
@@ -43,6 +55,7 @@ type KeyMap struct {
 	FilterTokenType      key.Binding
 	ClearTokenTypeFilter key.Binding
 	Quit                 key.Binding
+	SidebarFocus         key.Binding
 }
 
 // AppKeys defines the keybindings for the application.
@@ -95,8 +108,44 @@ var AppKeys = KeyMap{
 	CopyDeployer: key.NewBinding(
 		key.WithKeys("d"), key.WithHelp("d", "copy deployer"),
 	),
+	CopyTxHash: key.NewBinding(
+		key.WithKeys("h"), key.WithHelp("h", "copy tx hash"),
+	),
+	ToggleJSON: key.NewBinding(
+		key.WithKeys("J"), key.WithHelp("J", "toggle raw JSON"),
+	),
+	RefreshDetail: key.NewBinding(
+		key.WithKeys("r"), key.WithHelp("r", "refresh data"),
+	),
+	VerifyContract: key.NewBinding(
+		key.WithKeys("v"), key.WithHelp("v", "verify source"),
+	),
+	ViewABI: key.NewBinding(
+		key.WithKeys("A"), key.WithHelp("A", "view ABI"),
+	),
+	ToggleAutoVerify: key.NewBinding(
+		key.WithKeys("B"), key.WithHelp("B", "toggle auto-verify"),
+	),
+	ToggleFlagInfo: key.NewBinding(
+		key.WithKeys("i"), key.WithHelp("i", "toggle flag info"),
+	),
+	DetailUp: key.NewBinding(
+		key.WithKeys("up", "k"), key.WithHelp("↑/k", "nav up"),
+	),
+	DetailDown: key.NewBinding(
+		key.WithKeys("down", "j"), key.WithHelp("↓/j", "nav down"),
+	),
 	WatchDeployer: key.NewBinding(
 		key.WithKeys("W"), key.WithHelp("W", "watch deployer"),
+	),
+	ToggleWatchlist: key.NewBinding(
+		key.WithKeys("a"), key.WithHelp("a", "toggle watchlist"),
+	),
+	DeployerView: key.NewBinding(
+		key.WithKeys("D"), key.WithHelp("D", "view deployer's contracts"),
+	),
+	TimelineView: key.NewBinding(
+		key.WithKeys("T"), key.WithHelp("T", "view contract timeline"),
 	),
 	IncreaseRisk:    key.NewBinding(key.WithKeys("]"), key.WithHelp("]", "inc min risk")),
 	DecreaseRisk:    key.NewBinding(key.WithKeys("["), key.WithHelp("[", "dec min risk")),
@@ -119,10 +168,11 @@ var AppKeys = KeyMap{
 	DecreaseSidePane: key.NewBinding(key.WithKeys("{"), key.WithHelp("{", "dec side pane")),
 	FilterTokenType:  key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "filter token type")),
 	ClearTokenTypeFilter: key.NewBinding(key.WithKeys("E"), key.WithHelp("E", "clear token type")),
+	SidebarFocus:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "focus sidebar")),
 	Quit: key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q", "quit")),
 }
 
-var FooterHelpKeys = []key.Binding{AppKeys.Pause, AppKeys.Sort, AppKeys.Open, AppKeys.ToggleLegend, AppKeys.Heatmap, AppKeys.StatsView, AppKeys.CheatSheet, AppKeys.Help, AppKeys.CommandPalette}
+var FooterHelpKeys = []key.Binding{AppKeys.Pause, AppKeys.Sort, AppKeys.Open, AppKeys.ToggleLegend, AppKeys.Heatmap, AppKeys.StatsView, AppKeys.CheatSheet, AppKeys.Help, AppKeys.CommandPalette, AppKeys.Quit}
 
 var availableCommands = []CommandItem{
 	{"Pause/Resume Updates", "Toggle live updates", "pause"},
@@ -150,6 +200,9 @@ var availableCommands = []CommandItem{
 	{"Open in Browser", "Open selected transaction in browser", "open_browser"},
 	{"Mark Reviewed", "Mark selected item as reviewed", "mark_reviewed"},
 	{"Watch Contract", "Toggle watch status for contract", "watch_contract"},
+	{"View Deployer Contracts", "View all contracts from selected deployer", "view_deployer_contracts"},
+	{"Toggle Watchlist View", "Show only watched contracts/deployers", "toggle_watchlist"},
+	{"View Contract Timeline", "View timeline of transactions for selected contract", "timeline_view"},
 	{"Watch Deployer", "Toggle watch status for deployer", "watch_deployer"},
 	{"Pin Contract", "Pin/Unpin selected contract", "pin_contract"},
 	{"Search/Filter", "Focus search bar", "search_filter"},
@@ -163,4 +216,12 @@ var availableCommands = []CommandItem{
 	{"Increase Side Pane", "Increase side pane width", "inc_side_pane"},
 	{"Decrease Side Pane", "Decrease side pane width", "dec_side_pane"},
 	{"Help", "Show help screen", "help"},
+	{"Verify Contract Source", "Check Etherscan for verified source code", "verify_contract"},
+	{"Toggle Auto-Verify", "Toggle automatic contract verification on new events", "toggle_auto_verify"},
+	{"Refresh Data", "Refresh on-chain data for selected contract", "refresh_data"},
+	{"Copy Transaction Hash", "Copy the selected transaction hash", "copy_tx_hash"},
+	{"Toggle JSON View", "Show/hide raw JSON in details", "toggle_json"},
+	{"View Contract ABI", "View the contract ABI if verified", "view_abi"},
+	{"Toggle Flag Info", "Toggle flag description in details", "toggle_flag_info"},
+	{"Focus Sidebar", "Toggle focus on the sidebar", "sidebar_focus"},
 }

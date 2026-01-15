@@ -3,6 +3,7 @@ package tui
 import (
 	"time"
 
+	"eth-watchtower-tui/config"
 	"eth-watchtower-tui/stats"
 	"eth-watchtower-tui/util"
 
@@ -18,6 +19,7 @@ type item struct {
 	watched         bool
 	pinned          bool
 	watchedDeployer bool
+	verificationStatus string
 }
 
 // flagItem implements list.Item interface for the flag filter list.
@@ -27,6 +29,18 @@ type flagItem struct {
 	desc  string
 }
 
+// deployerContractItem implements list.Item for the deployer contracts view.
+type deployerContractItem struct {
+	contract string
+	block    int64
+	risk     int
+}
+
+// timelineItem implements list.Item for the contract timeline view.
+type timelineItem struct {
+	stats.LogEntry
+}
+
 type CommandItem struct {
 	Title string
 	Desc  string
@@ -34,6 +48,7 @@ type CommandItem struct {
 }
 
 type BlockchainData struct {
+	Contract     string
 	Balance      string
 	CodeSize     int
 	GasUsed      string
@@ -42,6 +57,19 @@ type BlockchainData struct {
 	DecodedInput string
 	Fetched      bool
 	Error        error
+	Value        string
+	GasPrice     string
+	TxFee        string
+	Nonce        uint64
+	TxIndex      uint64
+	DecodedLogs  []string
+	VerificationStatus string
+	ABI          string
+	TokenPrice   string
+	TokenSymbol  string
+	TokenMarketCap string
+	TokenVolume24h string
+	Sender       string
 }
 
 type Model struct {
@@ -73,6 +101,7 @@ type Model struct {
 	HighRiskBanner      string
 	PendingReviewItem   *item
 	DetailFlagIndex     int
+	DetailFlagInfoCollapsed bool
 	ActiveFlagFilter    string
 	FilterSince         time.Time
 	FilterUntil         time.Time
@@ -93,6 +122,16 @@ type Model struct {
 	CompactMode         bool
 	ShowFooterHelp      bool
 	ShowingCheatSheet   bool
+	ShowingWatchlist    bool
+	AutoVerifyContracts bool
+	VerificationResults map[string]VerificationStatusMsg
+	ShowingABI          bool
+	ShowingDeployerView bool
+	DeployerViewDeployer string
+	DeployerContractList list.Model
+	ShowingTimelineView bool
+	TimelineContract    string
+	TimelineList        list.Model
 	CommandInput        textinput.Model
 	ShowingCommandPalette bool
 	FilteredCommands    []CommandItem
@@ -100,6 +139,10 @@ type Model struct {
 	LatestHighRiskEntry *stats.LogEntry
 	CommandHistory      []string
 	RpcUrls             []string
+	CoinmarketcapApiKey string
+	EtherscanApiKey     string
+	ExplorerApiUrl      string
+	ExplorerVerificationPath string
 	RpcFailover         bool
 	RpcLatency          time.Duration
 	NewAlertInDetail    bool
@@ -107,6 +150,7 @@ type Model struct {
 	LoadingDetail       bool
 	ProgramStart        time.Time
 	SidePaneWidth       int
+	ApiHealth           map[string]string // url -> status
 	ActiveTokenTypeFilter string
 	FilterList          list.Model
 	ShowingFilterList   bool
@@ -115,6 +159,9 @@ type Model struct {
 	TimeFilterType      string // "since" or "until"
 	LogFilePath         string
 	StateFilePath       string
+	SidebarActive       bool
+	SidebarSelection    int
+	LatencyThresholds   config.LatencyThresholds
 }
 
 type InitMsg struct {
@@ -131,11 +178,17 @@ type InitMsg struct {
 	MinRiskScore        int
 	CommandHistory      []string
 	RpcUrls             []string
+	AutoVerifyContracts bool
+	CoinmarketcapApiKey string
+	EtherscanApiKey     string
+	ExplorerApiUrl      string
+	ExplorerVerificationPath string
 	SidePaneWidth       int
 	LatestHighRiskEntry *stats.LogEntry
 	HighRiskBanner      string
 	LogFilePath         string
 	StateFilePath       string
+	LatencyThresholds   config.LatencyThresholds
 }
 
 type ClearAlertMsg struct{}
@@ -147,4 +200,16 @@ type BlockchainDataMsg struct {
 	Data     *BlockchainData
 	UsedURL  string
 	Latency  time.Duration
+}
+
+type ApiHealthMsg struct {
+	URL    string
+	Status string // "OK", "Error: ..."
+}
+
+type VerificationStatusMsg struct {
+	Contract string
+	Status   string
+	Error    error
+	ABI      string
 }

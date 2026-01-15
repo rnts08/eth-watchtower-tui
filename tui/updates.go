@@ -6,10 +6,12 @@ import (
 	"time"
 
 	"eth-watchtower-tui/data"
+	"eth-watchtower-tui/stats"
 	"eth-watchtower-tui/util"
 
+	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -29,7 +31,8 @@ func (m *Model) resize(width, height int) {
 	}
 
 	m.List.SetSize(availableWidth, height-v-footerHeight)
-	m.Viewport = viewport.New(width-6, height-v-footerHeight)
+	m.Viewport.Width = width - 6
+	m.Viewport.Height = height - v - footerHeight
 }
 
 func (m *Model) jumpToHighRisk() (tea.Model, tea.Cmd) {
@@ -51,11 +54,12 @@ func (m *Model) updateHelp(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc", "q", "?":
+		if key.Matches(msg, AppKeys.Quit) || key.Matches(msg, AppKeys.Help) {
 			m.ShowingHelp = false
 			m.resize(m.WindowWidth, m.WindowHeight) // Restore viewport for list
 			return m, nil
+		}
+		switch msg.String() {
 		case "left", "h":
 			if m.HelpPage > 0 {
 				m.HelpPage--
@@ -70,6 +74,24 @@ func (m *Model) updateHelp(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.Viewport.GotoTop()
 			}
 			return m, nil
+		case "e":
+			_ = clipboard.WriteAll("0x9b4FfDADD87022C8B7266e28ad851496115ffB48")
+			m.AlertMsg = "Copied ETH donation address"
+			return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return ClearAlertMsg{}
+			})
+		case "s":
+			_ = clipboard.WriteAll("68L4XzSbRUaNE4UnxEd8DweSWEoiMQi6uygzERZLbXDw")
+			m.AlertMsg = "Copied SOL donation address"
+			return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return ClearAlertMsg{}
+			})
+		case "b":
+			_ = clipboard.WriteAll("bc1qkmzc6d49fl0edyeynezwlrfqv486nmk6p5pmta")
+			m.AlertMsg = "Copied BTC donation address"
+			return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+				return ClearAlertMsg{}
+			})
 		}
 	}
 	m.Viewport, cmd = m.Viewport.Update(msg)
@@ -109,11 +131,93 @@ func (m *Model) updateFilterList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *Model) updateDeployerView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, AppKeys.Quit) || key.Matches(msg, AppKeys.DeployerView) {
+			m.ShowingDeployerView = false
+			return m, nil
+		}
+		if msg.String() == "enter" {
+			if selected, ok := m.DeployerContractList.SelectedItem().(deployerContractItem); ok {
+				// Find the full LogEntry for the selected contract
+				var targetEntry stats.LogEntry
+				found := false
+				for _, entry := range m.Items {
+					if entry.Contract == selected.contract {
+						targetEntry = entry
+						found = true
+						break
+					}
+				}
+
+				if found {
+					// Create a temporary item to open the detail view
+					tempItem := item{
+						LogEntry:        targetEntry,
+						watched:         m.WatchlistSet[targetEntry.Contract],
+						pinned:          m.PinnedSet[targetEntry.Contract],
+						watchedDeployer: m.WatchedDeployersSet[targetEntry.Deployer],
+					}
+					m.ShowingDeployerView = false
+					return m.openDetailView(tempItem)
+				}
+			}
+		}
+	}
+	m.DeployerContractList, cmd = m.DeployerContractList.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) updateTimelineView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, AppKeys.Quit) || key.Matches(msg, AppKeys.TimelineView) {
+			m.ShowingTimelineView = false
+			return m, nil
+		}
+		if msg.String() == "enter" {
+			if selected, ok := m.TimelineList.SelectedItem().(timelineItem); ok {
+				// Create a temporary item to open the detail view
+				tempItem := item{
+					LogEntry:        selected.LogEntry,
+					watched:         m.WatchlistSet[selected.Contract],
+					pinned:          m.PinnedSet[selected.Contract],
+					watchedDeployer: m.WatchedDeployersSet[selected.Deployer],
+				}
+				m.ShowingTimelineView = false
+				return m.openDetailView(tempItem)
+			}
+		}
+	}
+	m.TimelineList, cmd = m.TimelineList.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) updateABIView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, AppKeys.Quit) || key.Matches(msg, AppKeys.ViewABI) {
+			m.ShowingABI = false
+			// Restore detail view content
+			if i, ok := m.List.SelectedItem().(item); ok {
+				m.Viewport.SetContent(renderDetail(i.LogEntry, m.WindowWidth, m.DetailFlagIndex, m.DetailData, m.LoadingDetail, m.DetailFlagInfoCollapsed))
+				m.Viewport.GotoTop()
+			}
+			return m, nil
+		}
+	}
+	m.Viewport, cmd = m.Viewport.Update(msg)
+	return m, cmd
+}
+
 func (m *Model) updateStats(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc", "q", "S":
+		if key.Matches(msg, AppKeys.Quit) || key.Matches(msg, AppKeys.StatsView) {
 			m.ShowingStats = false
 			return m, nil
 		}
@@ -168,8 +272,7 @@ func (m *Model) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) updateCheatSheet(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc", "q", "K":
+		if key.Matches(msg, AppKeys.Quit) || key.Matches(msg, AppKeys.CheatSheet) {
 			m.ShowingCheatSheet = false
 			return m, nil
 		}
@@ -219,7 +322,7 @@ func (m *Model) updateTimeFilter(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.InTimeFilterMode = false
 			m.TimeFilterType = ""
 			m.SearchInput.Blur()
-			m.SearchInput.Placeholder = "Contract, TxHash, Deployer..."
+			m.SearchInput.Placeholder = PlaceholderSearch
 			m.SearchInput.SetValue("")
 			return m, tea.Batch(m.updateListItems(), tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
 				return ClearAlertMsg{}
@@ -228,7 +331,7 @@ func (m *Model) updateTimeFilter(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.InTimeFilterMode = false
 			m.TimeFilterType = ""
 			m.SearchInput.Blur()
-			m.SearchInput.Placeholder = "Contract, TxHash, Deployer..."
+			m.SearchInput.Placeholder = PlaceholderSearch
 			m.SearchInput.SetValue("")
 			return m, nil
 		}
@@ -240,18 +343,63 @@ func (m *Model) updateTimeFilter(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) updateListItems() tea.Cmd {
 	var visibleItems []list.Item
 	for _, e := range m.Items {
-		// ... filtering logic ...
-		// Simplified for brevity, assuming full logic is copied or adapted
-		// For now, let's just show all items to fix the build, or copy the logic if needed.
-		// Actually, I should copy the logic from the previous main.go to be correct.
-		
-		// (Logic copied from previous main.go refactoring)
+		if m.ShowingWatchlist {
+			if !m.WatchlistSet[e.Contract] && !m.WatchedDeployersSet[e.Deployer] {
+				continue
+			}
+		}
+		if m.ActiveFlagFilter != "" {
+			hasFlag := false
+			for _, f := range e.Flags {
+				if f == m.ActiveFlagFilter {
+					hasFlag = true
+					break
+				}
+			}
+			if !hasFlag {
+				continue
+			}
+		}
+		if m.ActiveTokenTypeFilter != "" {
+			tType := e.TokenType
+			if tType == "" {
+				tType = "Unknown"
+			}
+			if tType != m.ActiveTokenTypeFilter {
+				continue
+			}
+		}
+		if !m.FilterSince.IsZero() && time.Unix(e.Timestamp, 0).Before(m.FilterSince) {
+			continue
+		}
+		if !m.FilterUntil.IsZero() && time.Unix(e.Timestamp, 0).After(m.FilterUntil) {
+			continue
+		}
+		if e.RiskScore < m.MinRiskScore || e.RiskScore > m.MaxRiskScore {
+			continue
+		}
+		if m.ActiveSearchQuery != "" {
+			query := strings.ToLower(m.ActiveSearchQuery)
+			searchableString := strings.ToLower(strings.Join([]string{
+				e.Contract,
+				e.TxHash,
+				e.Deployer,
+				e.TokenType,
+				strings.Join(e.Flags, " "),
+			}, " "))
+			if !strings.Contains(searchableString, query) {
+				continue
+			}
+		}
+
 		if m.ShowReviewed || !m.ReviewedSet[util.GetReviewKey(e)] {
+			status := m.VerificationResults[e.Contract].Status
 			visibleItems = append(visibleItems, item{
-				LogEntry:        e,
-				watched:         m.WatchlistSet[e.Contract],
-				pinned:          m.PinnedSet[e.Contract],
-				watchedDeployer: m.WatchedDeployersSet[e.Deployer],
+				LogEntry:           e,
+				watched:            m.WatchlistSet[e.Contract],
+				pinned:             m.PinnedSet[e.Contract],
+				watchedDeployer:    m.WatchedDeployersSet[e.Deployer],
+				verificationStatus: status,
 			})
 		}
 	}
@@ -259,6 +407,9 @@ func (m *Model) updateListItems() tea.Cmd {
 }
 
 func (m *Model) saveAppState() error {
+	if m.StateFilePath == "" {
+		return nil
+	}
 	state := data.PersistentState{
 		FileOffset:          m.FileOffset,
 		SidePaneWidth:       m.SidePaneWidth,

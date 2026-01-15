@@ -68,10 +68,16 @@ func TestReadLogEntries(t *testing.T) {
 
 	for _, e := range entries {
 		data, _ := json.Marshal(e)
-		f.Write(data)
-		f.WriteString("\n")
+		if _, err := f.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString("\n"); err != nil {
+			t.Fatal(err)
+		}
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Test reading from beginning
 	readEntries, offset, err := ReadLogEntries(logFile, 0)
@@ -105,9 +111,15 @@ func TestReadLogEntries(t *testing.T) {
 	}
 	newEntry := stats.LogEntry{Contract: "0x3", Block: 102}
 	data, _ := json.Marshal(newEntry)
-	f.Write(data)
-	f.WriteString("\n")
-	f.Close()
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Read new data
 	readEntries3, offset3, err := ReadLogEntries(logFile, offset)
@@ -142,15 +154,29 @@ func TestReadLogHistory(t *testing.T) {
 
 	// Write entries
 	d1, _ := json.Marshal(entries[0])
-	f.Write(d1)
-	f.WriteString("\n")
+	if _, err := f.Write(d1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		t.Fatal(err)
+	}
 	d2, _ := json.Marshal(entries[1])
-	f.Write(d2)
-	f.WriteString("\n")
+	if _, err := f.Write(d2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		t.Fatal(err)
+	}
 	d3, _ := json.Marshal(entries[2])
-	f.Write(d3)
-	f.WriteString("\n")
-	f.Close()
+	if _, err := f.Write(d3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Calculate limit to include first 2 entries
 	limit := int64(len(d1) + 1 + len(d2) + 1)
@@ -169,7 +195,7 @@ func TestReadLogHistory(t *testing.T) {
 	}
 
 	// Test with limit larger than file (should return nil as per implementation logic check)
-	historyFull, err := ReadLogHistory(logFile, limit+1000)
+	historyFull, _ := ReadLogHistory(logFile, limit+1000)
 	if historyFull != nil {
 		t.Error("Expected nil history when limit > file size")
 	}
