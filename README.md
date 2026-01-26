@@ -39,4 +39,4 @@ You can also support the project through donations:
 
 ## 🚀 Live Site
 
-View the project live here: https://github.com/rnts08/eth-watchtower-tui
+View the project live here: https://rnts08.github.io/eth-watchtower-tui/
